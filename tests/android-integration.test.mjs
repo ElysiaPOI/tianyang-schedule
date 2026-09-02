@@ -1,0 +1,38 @@
+import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
+import test from "node:test"
+
+const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8")
+
+test("android build uses the offline static export", async () => {
+  const [config, pkg, gradle] = await Promise.all([
+    read("next.config.ts"),
+    read("package.json"),
+    read("android/app/build.gradle"),
+  ])
+  assert.match(config, /output: "export"/)
+  assert.match(pkg, /build:android-web/)
+  assert.match(gradle, /dist\/client/)
+})
+
+test("android import keeps credentials inside the official web page", async () => {
+  const [main, importer, network] = await Promise.all([
+    read("android/app/src/main/java/com/elysiapoi/tianyangschedule/MainActivity.java"),
+    read("android/app/src/main/java/com/elysiapoi/tianyangschedule/EducationImportActivity.java"),
+    read("android/app/src/main/res/xml/network_security_config.xml"),
+  ])
+  assert.match(main, /addJavascriptInterface\(new AndroidBridge\(\), "TianyangAndroid"\)/)
+  assert.doesNotMatch(importer, /addJavascriptInterface/)
+  assert.match(importer, /jxgl\.dlut\.edu\.cn\/student\/ucas-sso\/login/)
+  assert.match(importer, /removeAllCookies/)
+  assert.match(importer, /%PDF-/)
+  assert.match(network, /jxgl\.dlut\.edu\.cn/)
+  assert.doesNotMatch(importer, /password|passwd|账号密码/i)
+})
+
+test("web app accepts a PDF delivered by the native bridge", async () => {
+  const source = await read("app/schedule-app.tsx")
+  assert.match(source, /tianyang:android-pdf-ready/)
+  assert.match(source, /openTeachingSystem/)
+  assert.match(source, /教务系统导入/)
+})

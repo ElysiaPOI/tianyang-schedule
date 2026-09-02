@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">天扬课表</string>
+    <string name="import_title">综合教务系统</string>
+    <string name="import_hint">请在官方页面完成登录，进入“我的课表”后点击下方按钮。</string>
+</resources>

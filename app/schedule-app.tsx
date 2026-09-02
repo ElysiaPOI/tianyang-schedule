@@ -18,6 +18,17 @@ import { Toaster } from "@/components/ui/sonner"
 import { parseDlutSchedulePdf } from "@/lib/dlut-pdf-parser"
 import { compactWeeks, currentWeek, dateForWeekday, dayNames, initialSchedule, timeSlots, weekRange, type Course, type CourseOverride, type Schedule } from "@/lib/schedule"
 
+declare global {
+  interface Window {
+    TianyangAndroid?: {
+      openTeachingSystem: () => void
+      platform?: () => string
+    }
+  }
+}
+
+type AndroidPdfReadyEvent = CustomEvent<{ url?: string; filename?: string }>
+
 const storageKey = "tianyang-schedule-v1"
 const colors = ["course-blue", "course-violet", "course-cyan", "course-emerald", "course-amber", "course-rose", "course-indigo", "course-slate"]
 const dayOfWeek = (date = new Date()) => date.getDay() === 0 ? 7 : date.getDay()
@@ -460,6 +471,7 @@ export default function ScheduleApp() {
   const [backupOpen, setBackupOpen] = useState(false)
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<Schedule | null>(null)
+  const [androidAvailable, setAndroidAvailable] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const backupInput = useRef<HTMLInputElement>(null)
 
@@ -474,7 +486,25 @@ export default function ScheduleApp() {
     } catch { localStorage.removeItem(storageKey) }
     setHydrated(true)
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined)
+    setAndroidAvailable(Boolean(window.TianyangAndroid?.openTeachingSystem))
   }, [])
+
+  useEffect(() => {
+    const receiveAndroidPdf = async (event: Event) => {
+      const { url, filename } = (event as AndroidPdfReadyEvent).detail ?? {}
+      if (!url) return
+      try {
+        const response = await fetch(url, { cache: "no-store" })
+        if (!response.ok) throw new Error("课表文件读取失败")
+        const blob = await response.blob()
+        await importPdf(new File([blob], filename || "学生大课表.pdf", { type: "application/pdf" }))
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "教务系统课表导入失败")
+      }
+    }
+    window.addEventListener("tianyang:android-pdf-ready", receiveAndroidPdf)
+    return () => window.removeEventListener("tianyang:android-pdf-ready", receiveAndroidPdf)
+  })
 
   useEffect(() => {
     const update = () => setNow(new Date())
@@ -738,6 +768,7 @@ export default function ScheduleApp() {
         <span><ShieldCheck />课程与实验课只保存在这台设备上</span>
         <div className="footer-actions">
           <button onClick={() => setBackupOpen(true)}><DatabaseBackup />备份与恢复</button>
+          {androidAvailable && <button onClick={() => window.TianyangAndroid?.openTeachingSystem()}><GraduationCap />教务系统导入</button>}
           <button onClick={() => fileInput.current?.click()}><FileUp />导入新学期课表</button>
         </div>
         <input ref={fileInput} className="sr-only" type="file" accept="application/pdf,.pdf" onChange={(event) => importPdf(event.target.files?.[0])} />
