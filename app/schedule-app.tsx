@@ -485,7 +485,9 @@ export default function ScheduleApp() {
       }
     } catch { localStorage.removeItem(storageKey) }
     setHydrated(true)
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined)
+    if (!window.TianyangAndroid && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => undefined)
+    }
     setAndroidAvailable(Boolean(window.TianyangAndroid?.openTeachingSystem))
   }, [])
 
