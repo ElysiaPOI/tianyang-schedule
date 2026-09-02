@@ -33,10 +33,11 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 public final class EducationImportActivity extends Activity {
     public static final String EXTRA_FILENAME = "filename";
-    private static final String LOGIN_URL = "http://jxgl.dlut.edu.cn/student/ucas-sso/login";
+    private static final String LOGIN_URL = "http://jxgl.dlut.edu.cn/student/home";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WebView webView;
@@ -108,7 +109,13 @@ public final class EducationImportActivity extends Activity {
         settings.setAllowContentAccess(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setSupportMultipleWindows(false);
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setUserAgentString(settings.getUserAgentString() + " TianyangScheduleImport/1.1");
+        webView.clearCache(true);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -119,8 +126,7 @@ public final class EducationImportActivity extends Activity {
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                String scheme = request.getUrl().getScheme();
-                if ("http".equals(scheme) || "https".equals(scheme)) return false;
+                if (isDlutHttpUri(request.getUrl())) return false;
                 startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
                 return true;
             }
@@ -134,6 +140,18 @@ public final class EducationImportActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient());
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) ->
                 startPdfDownload(url, userAgent, webView.getUrl()));
+    }
+
+    private boolean isDlutHttpUri(Uri uri) {
+        String scheme = uri.getScheme();
+        return ("http".equals(scheme) || "https".equals(scheme)) && isDlutHost(uri);
+    }
+
+    private boolean isDlutHost(Uri uri) {
+        String host = uri.getHost();
+        if (host == null) return false;
+        host = host.toLowerCase(Locale.ROOT);
+        return host.equals("dlut.edu.cn") || host.endsWith(".dlut.edu.cn");
     }
 
     private void findAndImport() {
@@ -156,6 +174,10 @@ public final class EducationImportActivity extends Activity {
 
     private void startPdfDownload(String url, String userAgent, String referer) {
         if (downloading) return;
+        if (!isDlutHttpUri(Uri.parse(url))) {
+            status.setText("已拒绝来自非大工域名的下载请求");
+            return;
+        }
         downloading = true;
         progress.setVisibility(ProgressBar.VISIBLE);
         status.setText("正在下载并校验课表…");
@@ -178,18 +200,7 @@ public final class EducationImportActivity extends Activity {
     }
 
     private void downloadPdf(String address, String userAgent, String referer) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(30000);
-        connection.setInstanceFollowRedirects(true);
-        connection.setRequestProperty("Accept", "application/pdf,*/*;q=0.8");
-        if (userAgent != null) connection.setRequestProperty("User-Agent", userAgent);
-        if (referer != null) connection.setRequestProperty("Referer", referer);
-        String cookies = CookieManager.getInstance().getCookie(address);
-        if (cookies != null) connection.setRequestProperty("Cookie", cookies);
-
-        int code = connection.getResponseCode();
-        if (code < 200 || code >= 300) throw new Exception("下载请求返回 " + code);
+        HttpURLConnection connection = openDlutConnection(address, userAgent, referer);
 
         File directory = new File(getFilesDir(), "imported");
         if (!directory.exists() && !directory.mkdirs()) throw new Exception("无法创建本地目录");
@@ -213,6 +224,40 @@ public final class EducationImportActivity extends Activity {
 
         if (destination.exists() && !destination.delete()) throw new Exception("无法替换旧课表文件");
         if (!temporary.renameTo(destination)) throw new Exception("无法保存课表文件");
+    }
+
+    private HttpURLConnection openDlutConnection(String address, String userAgent, String referer) throws Exception {
+        URL current = new URL(address);
+        for (int redirects = 0; redirects < 5; redirects++) {
+            Uri currentUri = Uri.parse(current.toString());
+            if (!isDlutHttpUri(currentUri)) throw new Exception("已拒绝非大工域名的下载地址");
+
+            HttpURLConnection connection = (HttpURLConnection) current.openConnection();
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("Accept", "application/pdf,*/*;q=0.8");
+            if (userAgent != null) connection.setRequestProperty("User-Agent", userAgent);
+            if (referer != null && isDlutHttpUri(Uri.parse(referer))) {
+                connection.setRequestProperty("Referer", referer);
+            }
+            String cookies = CookieManager.getInstance().getCookie(current.toString());
+            if (cookies != null) connection.setRequestProperty("Cookie", cookies);
+
+            int code = connection.getResponseCode();
+            if (code >= 200 && code < 300) return connection;
+            if (code >= 300 && code < 400) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (location == null) throw new Exception("下载跳转缺少地址");
+                current = new URL(current, location);
+                referer = currentUri.toString();
+                continue;
+            }
+            connection.disconnect();
+            throw new Exception("下载请求返回 " + code);
+        }
+        throw new Exception("课表下载跳转次数过多");
     }
 
     private int dp(int value) {
