@@ -80,9 +80,10 @@ public final class MainActivity extends Activity {
     }
 
     private void deliverImportedPdf(String filename) {
+        String safeFilename = filename == null || filename.isBlank() ? "学生大课表.pdf" : filename;
         String url = APP_ORIGIN + "/imported/schedule.pdf";
         String script = "window.dispatchEvent(new CustomEvent('tianyang:android-pdf-ready',{detail:{url:"
-                + JSONObject.quote(url) + ",filename:" + JSONObject.quote(filename) + "}}));";
+                + JSONObject.quote(url) + ",filename:" + JSONObject.quote(safeFilename) + "}}));";
         webView.evaluateJavascript(script, null);
     }
 
