@@ -2,6 +2,7 @@ package com.elysiapoi.tianyangschedule;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -9,6 +10,8 @@ import android.os.Bundle;
 import android.webkit.JavascriptInterface;
 import android.webkit.MimeTypeMap;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -25,10 +28,12 @@ import java.io.InputStream;
 
 public final class MainActivity extends Activity {
     private static final int IMPORT_REQUEST = 1101;
+    private static final int PDF_PICKER_REQUEST = 1102;
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
 
     private WebView webView;
     private WebViewAssetLoader assetLoader;
+    private ValueCallback<Uri[]> fileChooserCallback;
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -49,12 +54,32 @@ public final class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
+        settings.setAllowContentAccess(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSupportMultipleWindows(false);
         settings.setUserAgentString(settings.getUserAgentString() + " TianyangSchedule/1.1");
 
         webView.addJavascriptInterface(new AndroidBridge(), "TianyangAndroid");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+                fileChooserCallback = callback;
+
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/pdf");
+                try {
+                    startActivityForResult(intent, PDF_PICKER_REQUEST);
+                    return true;
+                } catch (ActivityNotFoundException ignored) {
+                    fileChooserCallback = null;
+                    callback.onReceiveValue(null);
+                    return false;
+                }
+            }
+        });
         webView.setWebViewClient(new LocalContentClient());
         setContentView(webView);
         webView.loadUrl(APP_ORIGIN + "/index.html");
@@ -90,6 +115,15 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PDF_PICKER_REQUEST) {
+            ValueCallback<Uri[]> callback = fileChooserCallback;
+            fileChooserCallback = null;
+            if (callback != null) {
+                callback.onReceiveValue(
+                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            }
+            return;
+        }
         if (requestCode == IMPORT_REQUEST && resultCode == RESULT_OK && data != null) {
             deliverImportedPdf(data.getStringExtra(EducationImportActivity.EXTRA_FILENAME));
         }
@@ -103,6 +137,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (fileChooserCallback != null) {
+            fileChooserCallback.onReceiveValue(null);
+            fileChooserCallback = null;
+        }
         if (webView != null) webView.destroy();
         super.onDestroy();
     }

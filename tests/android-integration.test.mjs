@@ -41,3 +41,13 @@ test("web app accepts a PDF delivered by the native bridge", async () => {
   assert.match(source, /openTeachingSystem/)
   assert.match(source, /教务系统导入/)
 })
+
+test("android webview opens the system PDF picker", async () => {
+  const main = await read("android/app/src/main/java/com/elysiapoi/tianyangschedule/MainActivity.java")
+  assert.match(main, /onShowFileChooser/)
+  assert.match(main, /Intent\.ACTION_OPEN_DOCUMENT/)
+  assert.match(main, /setType\("application\/pdf"\)/)
+  assert.match(main, /PDF_PICKER_REQUEST/)
+  assert.match(main, /FileChooserParams\.parseResult/)
+  assert.match(main, /setAllowContentAccess\(true\)/)
+})
