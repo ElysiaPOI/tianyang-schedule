@@ -7,8 +7,14 @@ import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -44,10 +50,18 @@ public final class EducationImportActivity extends Activity {
     private static final String LOGIN_URL = "http://jxgl.dlut.edu.cn/student/home";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable automationRunnable = () -> {
+        if (importFlowActive && !awaitingPdfDownload && !downloading && webView != null) {
+            runAutomationStep();
+        }
+    };
     private WebView webView;
     private TextView status;
     private ProgressBar progress;
     private boolean downloading;
+    private boolean importFlowActive;
+    private boolean awaitingPdfDownload;
+    private int automationAttempts;
     private int failedCriticalAssetCount;
     private String firstFailedAssetHost;
 
@@ -88,7 +102,7 @@ public final class EducationImportActivity extends Activity {
         actions.addView(close, new LinearLayout.LayoutParams(0, dp(48), 1));
 
         Button importButton = new Button(this);
-        importButton.setText("查找并导入课表");
+        importButton.setText("自动查找并导入");
         importButton.setTextColor(Color.WHITE);
         importButton.setBackgroundColor(Color.rgb(23, 92, 211));
         importButton.setOnClickListener(view -> findAndImport());
@@ -135,11 +149,18 @@ public final class EducationImportActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(ProgressBar.GONE);
-                if (failedCriticalAssetCount > 0) {
+                if (importFlowActive) {
+                    if (awaitingPdfDownload) {
+                        status.setText("正在等待教务系统返回 PDF…");
+                    } else {
+                        status.setText("正在自动进入课表导出页面…");
+                        scheduleAutomationStep(650);
+                    }
+                } else if (failedCriticalAssetCount > 0) {
                     status.setText("页面资源加载失败 " + failedCriticalAssetCount + " 项（"
                             + firstFailedAssetHost + "），请截图反馈此提示");
                 } else {
-                    status.setText("登录后进入“我的课表”，再点击“查找并导入课表”");
+                    status.setText("登录成功后点一次下方按钮，应用会自动进入课表并导入");
                 }
             }
 
@@ -211,26 +232,79 @@ public final class EducationImportActivity extends Activity {
     }
 
     private void findAndImport() {
+        if (downloading) return;
+        importFlowActive = true;
+        awaitingPdfDownload = false;
+        automationAttempts = 0;
+        status.setText("正在自动查找“我的课表”…");
+        scheduleAutomationStep(0);
+    }
+
+    private void scheduleAutomationStep(long delayMillis) {
+        mainHandler.removeCallbacks(automationRunnable);
+        mainHandler.postDelayed(automationRunnable, delayMillis);
+    }
+
+    private void runAutomationStep() {
+        if (++automationAttempts > 32) {
+            importFlowActive = false;
+            progress.setVisibility(ProgressBar.GONE);
+            status.setText("未能自动定位课表入口，请截图当前页面反馈");
+            Toast.makeText(this, "未能自动定位课表入口，请截图当前页面反馈", Toast.LENGTH_LONG).show();
+            return;
+        }
+
         String script = "(() => {"
-                + "const nodes=[...document.querySelectorAll('a,button,[role=button],input[type=button],input[type=submit],li,span')];"
-                + "const text=n=>(n.innerText||n.value||'').replace(/\\s+/g,'').trim();"
-                + "const pdf=nodes.find(n=>/导出.*PDF|PDF.*导出|导出至一个PDF文件/i.test(text(n)));"
-                + "if(pdf){pdf.click();return 'export';}"
-                + "const menu=nodes.find(n=>text(n)==='导出'||text(n).startsWith('导出'));"
-                + "if(menu){menu.click();setTimeout(()=>{const p=[...document.querySelectorAll('a,button,li,span')].find(n=>/PDF/i.test(text(n))&&/导出|文件/.test(text(n)));if(p)p.click();},350);return 'export';}"
-                + "const schedule=nodes.find(n=>text(n).includes('我的课表'));"
-                + "if(schedule){schedule.click();return 'schedule';}"
+                + "const docs=[document];"
+                + "for(const f of document.querySelectorAll('iframe')){try{if(f.contentDocument)docs.push(f.contentDocument)}catch(e){}}"
+                + "const text=n=>String(n.innerText||n.value||n.textContent||'').replace(/\\s+/g,'').trim();"
+                + "const visible=n=>{const s=n.ownerDocument.defaultView.getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};"
+                + "const nodes=[].concat(...docs.map(d=>[...d.querySelectorAll('a,button,input,[role=button],[onclick],li,span,div,p')])).filter(visible);"
+                + "const activate=n=>{let c=n;for(let i=0;c&&i<5;i++,c=c.parentElement){if(c.matches('a,button,input,[role=button],[onclick],li,.btn,.menu-item,.dropdown-toggle')){c.click();return true}}n.click();return true};"
+                + "const exact=(...labels)=>nodes.filter(n=>labels.includes(text(n))).sort((a,b)=>text(a).length-text(b).length)[0];"
+                + "const contains=(...labels)=>nodes.filter(n=>labels.some(v=>text(n).includes(v))&&text(n).length<36).sort((a,b)=>text(a).length-text(b).length)[0];"
+                + "const pdf=exact('导出至一个PDF文件','导出为PDF文件','导出PDF','PDF导出')||nodes.find(n=>/导出.*PDF|PDF.*导出/i.test(text(n))&&text(n).length<36);"
+                + "if(pdf){activate(pdf);return 'pdf';}"
+                + "const exportMenu=exact('导出')||nodes.find(n=>/^导出[▼▽▾]?$/.test(text(n)));"
+                + "if(exportMenu){activate(exportMenu);return 'menu';}"
+                + "const printSchedule=exact('打印大课表','大课表','周课表')||contains('打印大课表');"
+                + "if(printSchedule){activate(printSchedule);return 'print';}"
+                + "const schedule=exact('我的课表')||contains('我的课表');"
+                + "if(schedule){activate(schedule);return 'schedule';}"
                 + "return 'none';})()";
         webView.evaluateJavascript(script, result -> {
-            if (result.contains("export")) status.setText("正在请求教务系统导出 PDF…");
-            else if (result.contains("schedule")) status.setText("正在进入“我的课表”，页面打开后请再点一次导入");
-            else Toast.makeText(this, "暂未找到课表入口，请先手动进入“我的课表”", Toast.LENGTH_LONG).show();
+            if (!importFlowActive || downloading) return;
+            if (result.contains("pdf")) {
+                awaitingPdfDownload = true;
+                status.setText("正在请求教务系统导出 PDF…");
+                mainHandler.postDelayed(() -> {
+                    if (importFlowActive && !downloading) exportCurrentPageToPdf();
+                }, 4500);
+            } else if (result.contains("menu")) {
+                status.setText("正在选择“导出至一个 PDF 文件”…");
+                scheduleAutomationStep(700);
+            } else if (result.contains("print")) {
+                status.setText("正在打开大课表导出页面…");
+                scheduleAutomationStep(1100);
+            } else if (result.contains("schedule")) {
+                status.setText("正在进入“我的课表”…");
+                scheduleAutomationStep(1100);
+            } else {
+                status.setText("正在等待课表页面加载…");
+                scheduleAutomationStep(900);
+            }
         });
     }
 
     private void startPdfDownload(String url, String userAgent, String referer) {
         if (downloading) return;
-        if (!isDlutHttpUri(Uri.parse(url))) {
+        awaitingPdfDownload = false;
+        Uri downloadUri = Uri.parse(url);
+        if ("blob".equals(downloadUri.getScheme()) || "data".equals(downloadUri.getScheme())) {
+            exportCurrentPageToPdf();
+            return;
+        }
+        if (!isDlutHttpUri(downloadUri)) {
             status.setText("已拒绝来自非大工域名的下载请求");
             return;
         }
@@ -240,19 +314,114 @@ public final class EducationImportActivity extends Activity {
         new Thread(() -> {
             try {
                 downloadPdf(url, userAgent, referer);
-                mainHandler.post(() -> {
-                    Intent result = new Intent().putExtra(EXTRA_FILENAME, "学生大课表.pdf");
-                    setResult(RESULT_OK, result);
-                    finish();
-                });
+                mainHandler.post(this::finishWithImportedPdf);
             } catch (Exception error) {
                 mainHandler.post(() -> {
                     downloading = false;
-                    progress.setVisibility(ProgressBar.GONE);
-                    status.setText("导入失败：" + (error.getMessage() == null ? "未获得有效 PDF" : error.getMessage()));
+                    status.setText("官方下载无法读取，正在改用网页课表生成 PDF…");
+                    exportCurrentPageToPdf();
                 });
             }
         }, "schedule-pdf-download").start();
+    }
+
+    private void exportCurrentPageToPdf() {
+        if (downloading || webView == null) return;
+        awaitingPdfDownload = false;
+        downloading = true;
+        progress.setVisibility(ProgressBar.VISIBLE);
+        status.setText("官方下载未响应，正在直接生成课表 PDF…");
+
+        File directory = new File(getFilesDir(), "imported");
+        if (!directory.exists() && !directory.mkdirs()) {
+            failNativePdf("无法创建本地目录");
+            return;
+        }
+        File temporary = new File(directory, "schedule.webview.pdf.tmp");
+        File destination = new File(directory, "schedule.pdf");
+        if (temporary.exists() && !temporary.delete()) {
+            failNativePdf("无法清理临时文件");
+            return;
+        }
+
+        PrintAttributes attributes = new PrintAttributes.Builder()
+                .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                .setResolution(new PrintAttributes.Resolution("tianyang_pdf", "课表 PDF", 600, 600))
+                .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
+                .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
+                .build();
+        PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter("学生大课表");
+        CancellationSignal cancellation = new CancellationSignal();
+        adapter.onLayout(null, attributes, cancellation, new PrintDocumentAdapter.LayoutResultCallback() {
+            @Override
+            public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
+                try {
+                    ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(temporary,
+                            ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE
+                                    | ParcelFileDescriptor.MODE_READ_WRITE);
+                    adapter.onWrite(new PageRange[]{PageRange.ALL_PAGES}, descriptor, cancellation,
+                            new PrintDocumentAdapter.WriteResultCallback() {
+                                @Override
+                                public void onWriteFinished(PageRange[] pages) {
+                                    try {
+                                        descriptor.close();
+                                        if (destination.exists() && !destination.delete()) {
+                                            failNativePdf("无法替换旧课表文件");
+                                        } else if (!temporary.renameTo(destination)) {
+                                            failNativePdf("无法保存课表文件");
+                                        } else {
+                                            finishWithImportedPdf();
+                                        }
+                                    } catch (Exception error) {
+                                        failNativePdf(error.getMessage());
+                                    }
+                                }
+
+                                @Override
+                                public void onWriteFailed(CharSequence error) {
+                                    try { descriptor.close(); } catch (Exception ignored) {}
+                                    failNativePdf(error == null ? "网页课表生成失败" : error.toString());
+                                }
+
+                                @Override
+                                public void onWriteCancelled() {
+                                    try { descriptor.close(); } catch (Exception ignored) {}
+                                    failNativePdf("网页课表生成已取消");
+                                }
+                            }, null);
+                } catch (Exception error) {
+                    failNativePdf(error.getMessage());
+                }
+            }
+
+            @Override
+            public void onLayoutFailed(CharSequence error) {
+                failNativePdf(error == null ? "无法排版网页课表" : error.toString());
+            }
+
+            @Override
+            public void onLayoutCancelled() {
+                failNativePdf("网页课表排版已取消");
+            }
+        }, null);
+    }
+
+    private void failNativePdf(String message) {
+        downloading = false;
+        importFlowActive = false;
+        awaitingPdfDownload = false;
+        mainHandler.removeCallbacks(automationRunnable);
+        progress.setVisibility(ProgressBar.GONE);
+        status.setText("导入失败：" + (message == null ? "网页课表生成失败" : message));
+    }
+
+    private void finishWithImportedPdf() {
+        importFlowActive = false;
+        awaitingPdfDownload = false;
+        mainHandler.removeCallbacks(automationRunnable);
+        Intent result = new Intent().putExtra(EXTRA_FILENAME, "学生大课表.pdf");
+        setResult(RESULT_OK, result);
+        finish();
     }
 
     private void downloadPdf(String address, String userAgent, String referer) throws Exception {
@@ -328,6 +497,7 @@ public final class EducationImportActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null);
         CookieManager.getInstance().removeAllCookies(null);
         CookieManager.getInstance().flush();
         if (webView != null) webView.destroy();

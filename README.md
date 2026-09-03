@@ -42,7 +42,7 @@
 3. 构建完成后下载 `tianyang-schedule-debug`。
 4. 解压并安装其中的 `app-debug.apk`。
 
-在应用内点击“教务系统导入”，应用会打开综合教务系统首页 `http://jxgl.dlut.edu.cn/student/home`。完成统一身份认证并进入“我的课表”后，再点击“查找并导入课表”。应用会捕获教务系统导出的 PDF，并交给现有解析器处理；原来的手动 PDF 导入入口仍然保留。
+在应用内点击“教务系统导入”，应用会打开综合教务系统首页 `http://jxgl.dlut.edu.cn/student/home`。完成统一身份认证后点一次“自动查找并导入”，应用会自动进入“我的课表”和大课表导出页，选择 PDF 导出并交给现有解析器处理。若教务系统未向 Android WebView 发出下载事件，应用会直接把当前大课表生成 PDF 作为兼容兜底；原来的手动 PDF 导入入口仍然保留。
 
 本地构建需要 Node.js 22.13、JDK 17、Android SDK 36 和 Gradle 9.5：
 
