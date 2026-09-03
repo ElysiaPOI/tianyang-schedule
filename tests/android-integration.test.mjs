@@ -51,3 +51,10 @@ test("android webview opens the system PDF picker", async () => {
   assert.match(main, /FileChooserParams\.parseResult/)
   assert.match(main, /setAllowContentAccess\(true\)/)
 })
+
+test("PDF import uses the legacy build for older Android WebViews", async () => {
+  const parser = await read("lib/dlut-pdf-parser.ts")
+  assert.match(parser, /pdfjs-dist\/legacy\/build\/pdf\.mjs/)
+  assert.match(parser, /pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url/)
+  assert.doesNotMatch(parser, /import\("pdfjs-dist"\)/)
+})

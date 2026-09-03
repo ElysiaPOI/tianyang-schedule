@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.1.2
+
+- PDF 解析切换为兼容构建，支持缺少 `Promise.withResolvers` 或 `Uint8Array.toHex` 的旧版 Android WebView
+
+## 1.1.1
+
+- 修复安卓安装包中点击“导入新学期课表”无法打开系统 PDF 选择器的问题
+
 ## 1.1.0
 
 - 新增安卓 APK 工程，课表页面可离线打包运行
