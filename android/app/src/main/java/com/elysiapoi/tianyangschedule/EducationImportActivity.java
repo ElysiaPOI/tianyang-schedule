@@ -4,16 +4,20 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -44,6 +48,8 @@ public final class EducationImportActivity extends Activity {
     private TextView status;
     private ProgressBar progress;
     private boolean downloading;
+    private int failedCriticalAssetCount;
+    private String firstFailedAssetHost;
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -107,21 +113,34 @@ public final class EducationImportActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setSupportMultipleWindows(false);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
+        settings.setLoadsImagesAutomatically(true);
+        settings.setBlockNetworkLoads(false);
         settings.setBuiltInZoomControls(true);
         settings.setDisplayZoomControls(false);
-        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        settings.setUserAgentString(settings.getUserAgentString() + " TianyangScheduleImport/1.1");
-        webView.clearCache(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setUserAgentString(toDesktopUserAgent(WebSettings.getDefaultUserAgent(this)));
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                failedCriticalAssetCount = 0;
+                firstFailedAssetHost = null;
+                progress.setVisibility(ProgressBar.VISIBLE);
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(ProgressBar.GONE);
-                status.setText("登录后进入“我的课表”，再点击“查找并导入课表”");
+                if (failedCriticalAssetCount > 0) {
+                    status.setText("页面资源加载失败 " + failedCriticalAssetCount + " 项（"
+                            + firstFailedAssetHost + "），请截图反馈此提示");
+                } else {
+                    status.setText("登录后进入“我的课表”，再点击“查找并导入课表”");
+                }
             }
 
             @Override
@@ -129,6 +148,18 @@ public final class EducationImportActivity extends Activity {
                 if (isDlutHttpUri(request.getUrl())) return false;
                 startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
                 return true;
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request,
+                                        WebResourceError error) {
+                recordResourceFailure(request, String.valueOf(error.getDescription()));
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request,
+                                            WebResourceResponse errorResponse) {
+                recordResourceFailure(request, "HTTP " + errorResponse.getStatusCode());
             }
 
             @Override
@@ -140,6 +171,31 @@ public final class EducationImportActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient());
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) ->
                 startPdfDownload(url, userAgent, webView.getUrl()));
+    }
+
+    private String toDesktopUserAgent(String original) {
+        String desktop = original.replaceFirst("\\(Linux; Android[^)]*\\)", "(X11; Linux x86_64)");
+        desktop = desktop.replace(" Version/4.0", "");
+        desktop = desktop.replace("; wv", "");
+        desktop = desktop.replace(" Mobile", "");
+        return desktop;
+    }
+
+    private void recordResourceFailure(WebResourceRequest request, String reason) {
+        Uri uri = request.getUrl();
+        if (request.isForMainFrame()) {
+            status.setText("页面打开失败：" + reason);
+            Log.w("TianyangImport", "Main page failed: " + uri + " (" + reason + ")");
+            return;
+        }
+        String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.ROOT);
+        if (!(path.endsWith(".css") || path.endsWith(".js") || path.endsWith(".mjs")
+                || path.contains("/static/") || path.contains("/assets/"))) return;
+        failedCriticalAssetCount++;
+        if (firstFailedAssetHost == null) {
+            firstFailedAssetHost = uri.getHost() == null ? uri.toString() : uri.getHost();
+        }
+        Log.w("TianyangImport", "Resource failed: " + uri + " (" + reason + ")");
     }
 
     private boolean isDlutHttpUri(Uri uri) {
