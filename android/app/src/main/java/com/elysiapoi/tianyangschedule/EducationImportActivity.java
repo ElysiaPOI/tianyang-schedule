@@ -5,16 +5,14 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
+import android.graphics.pdf.PdfDocument;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.print.PageRange;
 import android.print.PrintAttributes;
-import android.print.PrintDocumentAdapter;
-import android.print.PrintDocumentInfo;
+import android.print.pdf.PrintedPdfDocument;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -50,11 +48,6 @@ public final class EducationImportActivity extends Activity {
     private static final String LOGIN_URL = "http://jxgl.dlut.edu.cn/student/home";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final Runnable automationRunnable = () -> {
-        if (importFlowActive && !awaitingPdfDownload && !downloading && webView != null) {
-            runAutomationStep();
-        }
-    };
     private WebView webView;
     private TextView status;
     private ProgressBar progress;
@@ -64,6 +57,11 @@ public final class EducationImportActivity extends Activity {
     private int automationAttempts;
     private int failedCriticalAssetCount;
     private String firstFailedAssetHost;
+    private final Runnable automationRunnable = () -> {
+        if (importFlowActive && !awaitingPdfDownload && !downloading && webView != null) {
+            runAutomationStep();
+        }
+    };
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -87,6 +85,7 @@ public final class EducationImportActivity extends Activity {
         root.addView(progress, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
 
+        WebView.enableSlowWholeDocumentDraw();
         webView = new WebView(this);
         root.addView(webView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
@@ -350,60 +349,42 @@ public final class EducationImportActivity extends Activity {
                 .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                 .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
                 .build();
-        PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter("学生大课表");
-        CancellationSignal cancellation = new CancellationSignal();
-        adapter.onLayout(null, attributes, cancellation, new PrintDocumentAdapter.LayoutResultCallback() {
-            @Override
-            public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
-                try {
-                    ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(temporary,
-                            ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE
-                                    | ParcelFileDescriptor.MODE_READ_WRITE);
-                    adapter.onWrite(new PageRange[]{PageRange.ALL_PAGES}, descriptor, cancellation,
-                            new PrintDocumentAdapter.WriteResultCallback() {
-                                @Override
-                                public void onWriteFinished(PageRange[] pages) {
-                                    try {
-                                        descriptor.close();
-                                        if (destination.exists() && !destination.delete()) {
-                                            failNativePdf("无法替换旧课表文件");
-                                        } else if (!temporary.renameTo(destination)) {
-                                            failNativePdf("无法保存课表文件");
-                                        } else {
-                                            finishWithImportedPdf();
-                                        }
-                                    } catch (Exception error) {
-                                        failNativePdf(error.getMessage());
-                                    }
-                                }
+        try (PrintedPdfDocument document = new PrintedPdfDocument(this, attributes);
+             FileOutputStream output = new FileOutputStream(temporary)) {
+            Rect pageArea = document.getPageContentRect();
+            int viewWidth = Math.max(1, webView.getWidth());
+            int contentHeight = Math.max(webView.getHeight(),
+                    Math.round(webView.getContentHeight() * webView.getScale()));
+            float scale = pageArea.width() / (float) viewWidth;
+            float viewHeightPerPage = pageArea.height() / scale;
+            int pageCount = Math.max(1, (int) Math.ceil(contentHeight / viewHeightPerPage));
+            if (pageCount > 20) throw new Exception("网页课表页数异常");
 
-                                @Override
-                                public void onWriteFailed(CharSequence error) {
-                                    try { descriptor.close(); } catch (Exception ignored) {}
-                                    failNativePdf(error == null ? "网页课表生成失败" : error.toString());
-                                }
-
-                                @Override
-                                public void onWriteCancelled() {
-                                    try { descriptor.close(); } catch (Exception ignored) {}
-                                    failNativePdf("网页课表生成已取消");
-                                }
-                            }, null);
-                } catch (Exception error) {
-                    failNativePdf(error.getMessage());
-                }
+            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+                PdfDocument.Page page = document.startPage(pageIndex);
+                page.getCanvas().save();
+                page.getCanvas().translate(pageArea.left, pageArea.top);
+                page.getCanvas().scale(scale, scale);
+                page.getCanvas().translate(0, -pageIndex * viewHeightPerPage);
+                webView.draw(page.getCanvas());
+                page.getCanvas().restore();
+                document.finishPage(page);
             }
+            document.writeTo(output);
+        } catch (Exception error) {
+            failNativePdf(error.getMessage());
+            return;
+        }
 
-            @Override
-            public void onLayoutFailed(CharSequence error) {
-                failNativePdf(error == null ? "无法排版网页课表" : error.toString());
-            }
-
-            @Override
-            public void onLayoutCancelled() {
-                failNativePdf("网页课表排版已取消");
-            }
-        }, null);
+        if (temporary.length() < 5) {
+            failNativePdf("生成的网页课表为空");
+        } else if (destination.exists() && !destination.delete()) {
+            failNativePdf("无法替换旧课表文件");
+        } else if (!temporary.renameTo(destination)) {
+            failNativePdf("无法保存课表文件");
+        } else {
+            finishWithImportedPdf();
+        }
     }
 
     private void failNativePdf(String message) {
