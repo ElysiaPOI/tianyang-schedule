@@ -39,6 +39,7 @@ public final class MainActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        WebView.enableSlowWholeDocumentDraw();
         getWindow().setStatusBarColor(Color.rgb(245, 247, 251));
         getWindow().setNavigationBarColor(Color.WHITE);
 

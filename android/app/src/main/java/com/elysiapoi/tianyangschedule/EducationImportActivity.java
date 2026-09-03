@@ -3,18 +3,22 @@ package com.elysiapoi.tianyangschedule;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
-import android.graphics.Color;
 import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.Picture;
 import android.graphics.Rect;
 import android.graphics.pdf.PdfDocument;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.print.PrintAttributes;
 import android.print.pdf.PrintedPdfDocument;
+import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.SslErrorHandler;
@@ -33,6 +37,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+
+import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.File;
@@ -42,6 +50,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.Set;
 
 public final class EducationImportActivity extends Activity {
     public static final String EXTRA_FILENAME = "filename";
@@ -54,6 +63,8 @@ public final class EducationImportActivity extends Activity {
     private boolean downloading;
     private boolean importFlowActive;
     private boolean awaitingPdfDownload;
+    private boolean pdfBridgeAvailable;
+    private boolean capturedPdfReceived;
     private int automationAttempts;
     private int failedCriticalAssetCount;
     private String firstFailedAssetHost;
@@ -113,6 +124,7 @@ public final class EducationImportActivity extends Activity {
 
         setContentView(root);
         configureWebView();
+        configurePdfBridge();
         webView.loadUrl(LOGIN_URL);
     }
 
@@ -148,6 +160,7 @@ public final class EducationImportActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(ProgressBar.GONE);
+                installPdfCaptureHook();
                 if (importFlowActive) {
                     if (awaitingPdfDownload) {
                         status.setText("正在等待教务系统返回 PDF…");
@@ -193,6 +206,36 @@ public final class EducationImportActivity extends Activity {
                 startPdfDownload(url, userAgent, webView.getUrl()));
     }
 
+    private void configurePdfBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        WebViewCompat.addWebMessageListener(
+                webView,
+                "TianyangPdfBridge",
+                Set.of("http://jxgl.dlut.edu.cn", "https://jxgl.dlut.edu.cn"),
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isDlutHttpUri(sourceOrigin)) return;
+                    receiveCapturedPdf(message.getData());
+                });
+        pdfBridgeAvailable = true;
+    }
+
+    private void installPdfCaptureHook() {
+        if (!pdfBridgeAvailable || webView == null) return;
+        String script = "(() => {"
+                + "const bridge=window.TianyangPdfBridge;if(!bridge)return;"
+                + "const install=w=>{try{if(w.__tianyangPdfHook)return;w.__tianyangPdfHook=true;"
+                + "const sendData=data=>{if(typeof data==='string'&&data.startsWith('data:application/pdf'))bridge.postMessage('pdf:'+data.slice(data.indexOf(',')+1));};"
+                + "const sendBlob=blob=>{if(!blob||blob.__tianyangSeen)return;try{blob.__tianyangSeen=true}catch(e){}"
+                + "const head=new w.FileReader();head.onload=()=>{if(String(head.result||'').startsWith('%PDF-')){const full=new w.FileReader();full.onload=()=>sendData(String(full.result||''));full.readAsDataURL(blob)}};head.readAsText(blob.slice(0,5));};"
+                + "const originalCreate=w.URL.createObjectURL.bind(w.URL);w.URL.createObjectURL=blob=>{sendBlob(blob);return originalCreate(blob)};"
+                + "const originalOpen=w.open?w.open.bind(w):null;if(originalOpen)w.open=(url,...args)=>{sendData(String(url||''));return originalOpen(url,...args)};"
+                + "w.document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a)sendData(String(a.href||''))},true);"
+                + "for(const f of w.document.querySelectorAll('iframe')){try{if(f.contentWindow)install(f.contentWindow)}catch(e){}}"
+                + "}catch(e){}};install(window);"
+                + "})()";
+        webView.evaluateJavascript(script, null);
+    }
+
     private String toDesktopUserAgent(String original) {
         String desktop = original.replaceFirst("\\(Linux; Android[^)]*\\)", "(X11; Linux x86_64)");
         desktop = desktop.replace(" Version/4.0", "");
@@ -219,6 +262,7 @@ public final class EducationImportActivity extends Activity {
     }
 
     private boolean isDlutHttpUri(Uri uri) {
+        if (uri == null) return false;
         String scheme = uri.getScheme();
         return ("http".equals(scheme) || "https".equals(scheme)) && isDlutHost(uri);
     }
@@ -234,8 +278,10 @@ public final class EducationImportActivity extends Activity {
         if (downloading) return;
         importFlowActive = true;
         awaitingPdfDownload = false;
+        capturedPdfReceived = false;
         automationAttempts = 0;
         status.setText("正在自动查找“我的课表”…");
+        installPdfCaptureHook();
         scheduleAutomationStep(0);
     }
 
@@ -257,50 +303,130 @@ public final class EducationImportActivity extends Activity {
                 + "const docs=[document];"
                 + "for(const f of document.querySelectorAll('iframe')){try{if(f.contentDocument)docs.push(f.contentDocument)}catch(e){}}"
                 + "const text=n=>String(n.innerText||n.value||n.textContent||'').replace(/\\s+/g,'').trim();"
-                + "const visible=n=>{const s=n.ownerDocument.defaultView.getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};"
+                + "const visible=n=>{const w=n.ownerDocument.defaultView,s=w.getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<w.innerHeight&&r.left<w.innerWidth};"
                 + "const nodes=[].concat(...docs.map(d=>[...d.querySelectorAll('a,button,input,[role=button],[onclick],li,span,div,p')])).filter(visible);"
-                + "const activate=n=>{let c=n;for(let i=0;c&&i<5;i++,c=c.parentElement){if(c.matches('a,button,input,[role=button],[onclick],li,.btn,.menu-item,.dropdown-toggle')){c.click();return true}}n.click();return true};"
+                + "const target=n=>{let c=n;for(let i=0;c&&i<12;i++,c=c.parentElement){const w=c.ownerDocument.defaultView,s=w.getComputedStyle(c);if(c.matches('a,button,input,[role=button],[onclick],li,.btn,.menu-item,.dropdown-toggle')||s.cursor==='pointer')return c}return n};"
+                + "const point=(action,n)=>{n=target(n);const r=n.getBoundingClientRect();let x=r.left+r.width/2,y=r.top+r.height/2,w=n.ownerDocument.defaultView;while(w!==window&&w.frameElement){const fr=w.frameElement.getBoundingClientRect();x+=fr.left;y+=fr.top;w=w.parent}return {action,x:x/window.innerWidth,y:y/window.innerHeight}};"
                 + "const exact=(...labels)=>nodes.filter(n=>labels.includes(text(n))).sort((a,b)=>text(a).length-text(b).length)[0];"
                 + "const contains=(...labels)=>nodes.filter(n=>labels.some(v=>text(n).includes(v))&&text(n).length<36).sort((a,b)=>text(a).length-text(b).length)[0];"
                 + "const pdf=exact('导出至一个PDF文件','导出为PDF文件','导出PDF','PDF导出')||nodes.find(n=>/导出.*PDF|PDF.*导出/i.test(text(n))&&text(n).length<36);"
-                + "if(pdf){activate(pdf);return 'pdf';}"
+                + "if(pdf)return point('pdf',pdf);"
                 + "const exportMenu=exact('导出')||nodes.find(n=>/^导出[▼▽▾]?$/.test(text(n)));"
-                + "if(exportMenu){activate(exportMenu);return 'menu';}"
+                + "if(exportMenu)return point('menu',exportMenu);"
                 + "const printSchedule=exact('打印大课表','大课表','周课表')||contains('打印大课表');"
-                + "if(printSchedule){activate(printSchedule);return 'print';}"
+                + "if(printSchedule)return point('print',printSchedule);"
                 + "const schedule=exact('我的课表')||contains('我的课表');"
-                + "if(schedule){activate(schedule);return 'schedule';}"
-                + "return 'none';})()";
+                + "if(schedule)return point('schedule',schedule);"
+                + "return {action:'none'};})()";
         webView.evaluateJavascript(script, result -> {
             if (!importFlowActive || downloading) return;
-            if (result.contains("pdf")) {
-                awaitingPdfDownload = true;
-                status.setText("正在请求教务系统导出 PDF…");
-                mainHandler.postDelayed(() -> {
-                    if (importFlowActive && !downloading) exportCurrentPageToPdf();
-                }, 4500);
-            } else if (result.contains("menu")) {
-                status.setText("正在选择“导出至一个 PDF 文件”…");
-                scheduleAutomationStep(700);
-            } else if (result.contains("print")) {
-                status.setText("正在打开大课表导出页面…");
-                scheduleAutomationStep(1100);
-            } else if (result.contains("schedule")) {
-                status.setText("正在进入“我的课表”…");
-                scheduleAutomationStep(1100);
-            } else {
+            try {
+                JSONObject target = new JSONObject(result);
+                String action = target.optString("action", "none");
+                if ("none".equals(action)) {
+                    status.setText("正在等待课表页面加载…");
+                    scheduleAutomationStep(900);
+                    return;
+                }
+                float x = (float) target.optDouble("x", -1);
+                float y = (float) target.optDouble("y", -1);
+                if (x < 0 || y < 0 || x > 1 || y > 1) throw new Exception("按钮位置异常");
+                installPdfCaptureHook();
+                tapWebView(x, y);
+                if ("pdf".equals(action)) {
+                    awaitingPdfDownload = true;
+                    status.setText("正在请求教务系统导出 PDF…");
+                    mainHandler.postDelayed(() -> {
+                        if (importFlowActive && !downloading && !capturedPdfReceived) {
+                            exportCurrentPageToPdf();
+                        }
+                    }, 6000);
+                } else if ("menu".equals(action)) {
+                    status.setText("正在选择“导出至一个 PDF 文件”…");
+                    scheduleAutomationStep(850);
+                } else if ("print".equals(action)) {
+                    status.setText("正在打开大课表导出页面…");
+                    scheduleAutomationStep(1300);
+                } else if ("schedule".equals(action)) {
+                    status.setText("正在进入“我的课表”…");
+                    scheduleAutomationStep(1300);
+                }
+            } catch (Exception error) {
                 status.setText("正在等待课表页面加载…");
                 scheduleAutomationStep(900);
             }
         });
     }
 
+    private void tapWebView(float xRatio, float yRatio) {
+        if (webView == null) return;
+        float x = Math.max(1, Math.min(webView.getWidth() - 1, xRatio * webView.getWidth()));
+        float y = Math.max(1, Math.min(webView.getHeight() - 1, yRatio * webView.getHeight()));
+        long downTime = SystemClock.uptimeMillis();
+        MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
+        MotionEvent up = MotionEvent.obtain(downTime, downTime + 90, MotionEvent.ACTION_UP, x, y, 0);
+        webView.dispatchTouchEvent(down);
+        webView.dispatchTouchEvent(up);
+        down.recycle();
+        up.recycle();
+    }
+
+    private void receiveCapturedPdf(String message) {
+        if (!importFlowActive || capturedPdfReceived || message == null || !message.startsWith("pdf:")) return;
+        capturedPdfReceived = true;
+        awaitingPdfDownload = false;
+        downloading = true;
+        mainHandler.removeCallbacks(automationRunnable);
+        progress.setVisibility(ProgressBar.VISIBLE);
+        status.setText("已取得学校原始 PDF，正在校验课表…");
+        String encoded = message.substring(4);
+        new Thread(() -> {
+            try {
+                byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+                if (bytes.length < 5
+                        || bytes[0] != '%'
+                        || bytes[1] != 'P'
+                        || bytes[2] != 'D'
+                        || bytes[3] != 'F'
+                        || bytes[4] != '-') {
+                    throw new Exception("教务系统生成的文件不是 PDF");
+                }
+                savePdfBytes(bytes);
+                mainHandler.post(this::finishWithImportedPdf);
+            } catch (Exception error) {
+                mainHandler.post(() -> failNativePdf(error.getMessage()));
+            }
+        }, "captured-schedule-pdf").start();
+    }
+
+    private void savePdfBytes(byte[] bytes) throws Exception {
+        File directory = new File(getFilesDir(), "imported");
+        if (!directory.exists() && !directory.mkdirs()) throw new Exception("无法创建本地目录");
+        File temporary = new File(directory, "schedule.pdf.tmp");
+        File destination = new File(directory, "schedule.pdf");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            output.write(bytes);
+        }
+        if (destination.exists() && !destination.delete()) throw new Exception("无法替换旧课表文件");
+        if (!temporary.renameTo(destination)) throw new Exception("无法保存课表文件");
+    }
+
     private void startPdfDownload(String url, String userAgent, String referer) {
         if (downloading) return;
         awaitingPdfDownload = false;
         Uri downloadUri = Uri.parse(url);
-        if ("blob".equals(downloadUri.getScheme()) || "data".equals(downloadUri.getScheme())) {
-            exportCurrentPageToPdf();
+        if ("data".equals(downloadUri.getScheme())) {
+            int comma = url.indexOf(',');
+            if (comma >= 0 && url.substring(0, comma).toLowerCase(Locale.ROOT).contains("application/pdf")) {
+                receiveCapturedPdf("pdf:" + url.substring(comma + 1));
+            }
+            return;
+        }
+        if ("blob".equals(downloadUri.getScheme())) {
+            status.setText("正在读取教务系统生成的 PDF…");
+            mainHandler.postDelayed(() -> {
+                if (importFlowActive && !downloading && !capturedPdfReceived) exportCurrentPageToPdf();
+            }, 3500);
             return;
         }
         if (!isDlutHttpUri(downloadUri)) {
@@ -324,6 +450,7 @@ public final class EducationImportActivity extends Activity {
         }, "schedule-pdf-download").start();
     }
 
+    @SuppressWarnings("deprecation")
     private void exportCurrentPageToPdf() {
         if (downloading || webView == null) return;
         awaitingPdfDownload = false;
@@ -343,33 +470,32 @@ public final class EducationImportActivity extends Activity {
             return;
         }
 
+        Picture picture = webView.capturePicture();
+        int pictureWidth = Math.max(1, picture.getWidth());
+        int pictureHeight = Math.max(1, picture.getHeight());
+        int pageWidthMils = 8270;
+        int pageHeightMils = Math.max(11690,
+                Math.min(28000, Math.round(pageWidthMils * pictureHeight / (float) pictureWidth)));
+        PrintAttributes.MediaSize singlePage = new PrintAttributes.MediaSize(
+                "tianyang_schedule_single_page", "单页学生大课表", pageWidthMils, pageHeightMils);
         PrintAttributes attributes = new PrintAttributes.Builder()
-                .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                .setResolution(new PrintAttributes.Resolution("tianyang_pdf", "课表 PDF", 600, 600))
+                .setMediaSize(singlePage)
+                .setResolution(new PrintAttributes.Resolution("tianyang_pdf", "课表 PDF", 240, 240))
                 .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                 .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
                 .build();
         PrintedPdfDocument document = new PrintedPdfDocument(this, attributes);
         try (FileOutputStream output = new FileOutputStream(temporary)) {
             Rect pageArea = document.getPageContentRect();
-            int viewWidth = Math.max(1, webView.getWidth());
-            int contentHeight = Math.max(webView.getHeight(),
-                    Math.round(webView.getContentHeight() * webView.getScale()));
-            float scale = pageArea.width() / (float) viewWidth;
-            float viewHeightPerPage = pageArea.height() / scale;
-            int pageCount = Math.max(1, (int) Math.ceil(contentHeight / viewHeightPerPage));
-            if (pageCount > 20) throw new Exception("网页课表页数异常");
-
-            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
-                PdfDocument.Page page = document.startPage(pageIndex);
-                page.getCanvas().save();
-                page.getCanvas().translate(pageArea.left, pageArea.top);
-                page.getCanvas().scale(scale, scale);
-                page.getCanvas().translate(0, -pageIndex * viewHeightPerPage);
-                webView.draw(page.getCanvas());
-                page.getCanvas().restore();
-                document.finishPage(page);
-            }
+            float scale = Math.min(pageArea.width() / (float) pictureWidth,
+                    pageArea.height() / (float) pictureHeight);
+            PdfDocument.Page page = document.startPage(0);
+            page.getCanvas().save();
+            page.getCanvas().translate(pageArea.left, pageArea.top);
+            page.getCanvas().scale(scale, scale);
+            picture.draw(page.getCanvas());
+            page.getCanvas().restore();
+            document.finishPage(page);
             document.writeTo(output);
         } catch (Exception error) {
             failNativePdf(error.getMessage());

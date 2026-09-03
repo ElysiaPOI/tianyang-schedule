@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
 import { AlertTriangle, Ban, CalendarClock, CalendarDays, ChevronLeft, ChevronRight, Clock3, DatabaseBackup, Download, FileUp, FlaskConical, GraduationCap, MapPin, NotebookPen, PencilLine, Plus, RotateCcw, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react"
 import { toast } from "sonner"
 
@@ -474,6 +474,7 @@ export default function ScheduleApp() {
   const [androidAvailable, setAndroidAvailable] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const backupInput = useRef<HTMLInputElement>(null)
+  const viewSwipeStart = useRef<{ x: number; y: number } | null>(null)
 
   useEffect(() => {
     try {
@@ -662,6 +663,22 @@ export default function ScheduleApp() {
     setView("day")
   }
 
+  function startViewSwipe(event: TouchEvent<HTMLDivElement>) {
+    const touch = event.touches[0]
+    if (touch) viewSwipeStart.current = { x: touch.clientX, y: touch.clientY }
+  }
+
+  function finishViewSwipe(event: TouchEvent<HTMLDivElement>) {
+    const start = viewSwipeStart.current
+    const touch = event.changedTouches[0]
+    viewSwipeStart.current = null
+    if (!start || !touch) return
+    const dx = touch.clientX - start.x
+    const dy = touch.clientY - start.y
+    if (Math.abs(dx) < 52 || Math.abs(dx) <= Math.abs(dy) * 1.25) return
+    setView(dx < 0 ? "week" : "day")
+  }
+
   function openAddCourse(day: number, slot = 1, fromBlank = false) {
     setAddContext({ day, slot, fromBlank })
     setAddOpen(true)
@@ -727,7 +744,7 @@ export default function ScheduleApp() {
         })}
       </div>
 
-      <Tabs value={view} onValueChange={(value) => setView(value as "day" | "week")} className="schedule-tabs">
+      <Tabs value={view} onValueChange={(value) => setView(value as "day" | "week")} className="schedule-tabs" onTouchStart={startViewSwipe} onTouchEnd={finishViewSwipe} onTouchCancel={() => { viewSwipeStart.current = null }}>
         <div className="view-toolbar">
           <TabsList className="view-tabs"><TabsTrigger value="day"><Clock3 />单日</TabsTrigger><TabsTrigger value="week"><CalendarDays />周课表</TabsTrigger></TabsList>
           {awayFromToday && <Button type="button" size="sm" variant="ghost" className="today-button" onClick={returnToToday}><RotateCcw />回到今天</Button>}
@@ -748,6 +765,7 @@ export default function ScheduleApp() {
         <TabsContent value="week" className="week-view">
           <div className="timetable-wrap">
             <div className="timetable">
+              {now && week === todayWeek && <div className="today-column-highlight" style={{ gridColumn: todayDay + 1, gridRow: "1 / -1" }} aria-hidden="true" />}
               <div className="table-corner"><Clock3 /></div>
               {dayNames.map((name, index) => <div className="table-day" key={name}><span>{name}</span><strong>{dateForWeekday(schedule.startsOn, week, index + 1).getDate()}</strong></div>)}
               {timeSlots.map((slot, slotIndex) => [

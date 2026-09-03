@@ -215,7 +215,7 @@ button { font: inherit; }
   transform: translateX(-50%);
 }
 
-.schedule-tabs { padding: 18px 26px 8px; }
+.schedule-tabs { padding: 18px 26px 8px; touch-action: pan-y; }
 .view-tabs {
   width: 210px;
   height: 40px !important;
@@ -329,12 +329,21 @@ button { font: inherit; }
 
 .timetable-wrap { overflow: visible; padding-bottom: 4px; }
 .timetable {
+  position: relative;
   display: grid;
   width: 100%;
   min-width: 0;
   grid-template-columns: 68px repeat(7, minmax(0, 1fr));
   grid-template-rows: 42px repeat(6, 68px);
   gap: 4px;
+}
+.today-column-highlight {
+  position: absolute;
+  inset: -2px;
+  z-index: 5;
+  border: 2px dashed rgba(47, 111, 237, .78);
+  border-radius: 12px;
+  pointer-events: none;
 }
 .table-corner, .table-day, .table-time, .table-cell {
   border: 1px solid var(--border);
