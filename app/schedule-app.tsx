@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Toaster } from "@/components/ui/sonner"
-import { parseDlutSchedulePdf } from "@/lib/dlut-pdf-parser"
+import { parseScheduleFile } from "@/lib/schedule-file-parser"
 import { compactWeeks, currentWeek, dateForWeekday, dayNames, initialSchedule, timeSlots, weekRange, type Course, type CourseOverride, type Schedule } from "@/lib/schedule"
 
 declare global {
@@ -27,7 +27,6 @@ declare global {
   }
 }
 
-type AndroidPdfReadyEvent = CustomEvent<{ url?: string; filename?: string }>
 type AndroidScheduleReadyEvent = CustomEvent<unknown>
 
 const storageKey = "tianyang-schedule-v1"
@@ -198,7 +197,7 @@ function CourseBar({ course, weekView = false, onOpen }: { course: Course; weekV
       <strong>{course.cancelled ? `停课 · ${weekView ? shortCourseName(course.name) : course.name}` : weekView ? shortCourseName(course.name) : course.name}</strong>
       {course.note && <NotebookPen className="note-indicator" aria-label="有备注" />}
     </span>
-    {!weekView && (course.cancelled ? <span className="cancelled-meta">本周已停课</span> : <span className="course-bar-meta"><span><MapPin /><span className="room-text">{course.room}</span></span><span><UserRound /><em>{course.teachers.join("、") || "教师待定"}</em></span></span>)}
+    {!weekView && (course.cancelled ? <span className="cancelled-meta">本周已停课</span> : <span className="course-bar-meta"><span><MapPin /><span className="room-text">{course.room}</span></span><span><UserRound /><em>{course.teachers.join("、") || "教师未获取"}</em></span></span>)}
     {weekView && <small>{course.cancelled ? "本周停课" : compactRoom(course.room)}</small>}
   </button>
 }
@@ -448,7 +447,7 @@ function CourseDetailDialog({
         <div><CalendarDays /><span><small>日期与周次</small>{dayNames[course.day - 1]} · {date.getMonth() + 1}月{date.getDate()}日 · {compactWeeks(course.weeks)}</span></div>
         <div><Clock3 /><span><small>上课时间</small>第 {course.startSection}–{course.endSection} 节 · {exactTime}</span></div>
         <div><MapPin /><span><small>上课地点</small>{course.room}</span></div>
-        <div><UserRound /><span><small>任课教师</small>{course.teachers.join("、") || "待定"}</span></div>
+        <div><UserRound /><span><small>任课教师</small>{course.teachers.join("、") || "教师未获取"}</span></div>
       </div>
       <div className="note-field">
         <Label htmlFor="course-note"><NotebookPen />课程备注</Label>
@@ -500,23 +499,6 @@ export default function ScheduleApp() {
     }
     setAndroidAvailable(Boolean(window.TianyangAndroid?.openTeachingSystem))
   }, [])
-
-  useEffect(() => {
-    const receiveAndroidPdf = async (event: Event) => {
-      const { url, filename } = (event as AndroidPdfReadyEvent).detail ?? {}
-      if (!url) return
-      try {
-        const response = await fetch(url, { cache: "no-store" })
-        if (!response.ok) throw new Error("课表文件读取失败")
-        const blob = await response.blob()
-        await importPdf(new File([blob], filename || "学生大课表.pdf", { type: "application/pdf" }))
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "教务系统课表导入失败")
-      }
-    }
-    window.addEventListener("tianyang:android-pdf-ready", receiveAndroidPdf)
-    return () => window.removeEventListener("tianyang:android-pdf-ready", receiveAndroidPdf)
-  })
 
   useEffect(() => {
     const receiveAndroidSchedule = (event: Event) => {
@@ -744,11 +726,11 @@ export default function ScheduleApp() {
     toast.success(cleanNote ? "课程备注已保存" : "课程备注已清除")
   }
 
-  async function importPdf(file?: File) {
+  async function importScheduleFile(file?: File) {
     if (!file) return
-    const toastId = toast.loading("正在识别新学期课表…")
+    const toastId = toast.loading(`正在读取 ${file.name}…`)
     try {
-      const parsed = await parseDlutSchedulePdf(file)
+      const parsed = await parseScheduleFile(file)
       applyImportedSchedule(parsed, toastId)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "课表识别失败", { id: toastId, duration: 6000 })
@@ -830,10 +812,10 @@ export default function ScheduleApp() {
         <span><ShieldCheck />课程与实验课只保存在这台设备上</span>
         <div className="footer-actions">
           <button onClick={() => setBackupOpen(true)}><DatabaseBackup />备份与恢复</button>
-          {androidAvailable && <button onClick={() => window.TianyangAndroid?.openTeachingSystem()}><GraduationCap />教务系统导入</button>}
-          <button onClick={() => fileInput.current?.click()}><FileUp />导入新学期课表</button>
+          {androidAvailable && <button onClick={() => window.TianyangAndroid?.openTeachingSystem()}><GraduationCap />教务系统读取</button>}
+          <button onClick={() => fileInput.current?.click()}><FileUp />从文件导入</button>
         </div>
-        <input ref={fileInput} className="sr-only" type="file" accept="application/pdf,.pdf" onChange={(event) => importPdf(event.target.files?.[0])} />
+        <input ref={fileInput} className="sr-only" type="file" accept=".pdf,.xlsx,.xls,.csv,.tsv,.txt,.ics,.html,.htm,.json,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/calendar,application/json" onChange={(event) => importScheduleFile(event.target.files?.[0])} />
         <input ref={backupInput} className="sr-only" type="file" accept="application/json,.json" onChange={(event) => prepareRestore(event.target.files?.[0])} />
       </footer>
       {!hydrated && <div className="loading-cover" />}

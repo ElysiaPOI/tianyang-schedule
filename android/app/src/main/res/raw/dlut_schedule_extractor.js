@@ -1,8 +1,10 @@
 (() => {
   const documents = [document]
+  const pageWindows = [window]
   for (const frame of document.querySelectorAll("iframe")) {
     try {
       if (frame.contentDocument) documents.push(frame.contentDocument)
+      if (frame.contentWindow) pageWindows.push(frame.contentWindow)
     } catch (_) {}
   }
 
@@ -62,7 +64,53 @@
     for (const match of source.matchAll(/(?:任课教师|授课教师|主讲教师|教师姓名|教师|老师)[:： \t]*([\u3400-\u9fff·、，, \t]{2,50})/g)) {
       result.push(...match[1].split(/[、，,\s]+/))
     }
-    return [...new Set(result.map(clean).filter((name) => /^[\u3400-\u9fff·]{2,8}$/.test(name) && !/^(任课|授课|主讲|教师|老师|姓名|上课|默认组)$/.test(name)))]
+    for (const match of source.matchAll(/(?:teacherNames?|teacherName|instructorNames?|instructor|jsmc|jsxm|rkjs|skjs)["']?\s*[:=]\s*["']([^"'\]\[}{]{2,80})/gi)) {
+      result.push(...match[1].split(/[、，,;；/\s]+/))
+    }
+    return [...new Set(result.map((name) => clean(name).replace(/[（(].*?[）)]/g, "").replace(/老师$/g, ""))
+      .filter((name) => /^[\u3400-\u9fff·]{2,8}$/.test(name) && !/^(任课|授课|主讲|教师|老师|姓名|上课|默认组|课程性质|开课单位)$/.test(name)))]
+  }
+
+  const capturedPayloads = pageWindows.flatMap((pageWindow) => {
+    try { return Array.isArray(pageWindow.__tianyangScheduleNetworkPayloads) ? pageWindow.__tianyangScheduleNetworkPayloads : [] } catch (_) { return [] }
+  })
+
+  const teachersFromPayloads = (course) => {
+    const result = []
+    const teacherKey = /^(?:teacherNames?|teacherName|instructorNames?|instructor|jsmc|jsxm|rkjs|skjs|jzgxm|rkjsmc)$/i
+    const collect = (value) => {
+      const values = Array.isArray(value) ? value : [value]
+      for (const item of values) {
+        if (typeof item === "string") result.push(...extractTeachers(`教师:${item}`))
+        else if (item && typeof item === "object") {
+          for (const nested of Object.values(item)) if (typeof nested === "string") result.push(...extractTeachers(`教师:${nested}`))
+        }
+      }
+    }
+    const visit = (value, depth = 0) => {
+      if (!value || typeof value !== "object" || depth > 12) return
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, depth + 1)
+        return
+      }
+      const primitives = Object.values(value).filter((item) => typeof item === "string" || typeof item === "number").map(String)
+      const sameCourse = primitives.some((item) => item.includes(course.code) || item === course.name || item.includes(course.name))
+      if (sameCourse) {
+        for (const [key, item] of Object.entries(value)) if (teacherKey.test(key)) collect(item)
+      }
+      for (const item of Object.values(value)) if (item && typeof item === "object") visit(item, depth + 1)
+    }
+    for (const payload of capturedPayloads) {
+      try { visit(JSON.parse(payload)) } catch (_) {
+        const marker = payload.indexOf(course.code) >= 0 ? course.code : course.name
+        let index = payload.indexOf(marker)
+        while (index >= 0) {
+          result.push(...extractTeachers(payload.slice(Math.max(0, index - 1200), index + marker.length + 1200)))
+          index = payload.indexOf(marker, index + marker.length)
+        }
+      }
+    }
+    return [...new Set(result)]
   }
 
   const courseNodes = []
@@ -171,7 +219,9 @@
     teachersByCode: {},
     scannedCodes: {},
     pendingCode: "",
+    observedTexts: [],
   })
+  if (!Array.isArray(teacherState.observedTexts)) teacherState.observedTexts = []
 
   const tooltipSelectors = [
     "[role=tooltip]", ".tooltip", ".tooltip-inner", ".popover", ".popover-content",
@@ -186,6 +236,38 @@
       return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0
     } catch (_) { return false }
   }
+  for (const doc of documents) {
+    try {
+      const view = doc.defaultView
+      if (!doc.__tianyangTeacherObserver && view.MutationObserver && doc.documentElement) {
+        doc.__tianyangTeacherObserver = new view.MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            const candidates = [mutation.target, ...mutation.addedNodes]
+            for (const node of candidates) {
+              const value = clean(node && (node.innerText || node.textContent || ""))
+              if (value && value.length < 1800 && /任课教师|授课教师|主讲教师|教师姓名|老师/.test(value)) {
+                teacherState.observedTexts.push(value)
+              }
+              if (node && node.attributes) {
+                for (const attribute of node.attributes) {
+                  if (/teacher|tooltip|popover|content|title/i.test(attribute.name) && attribute.value) {
+                    teacherState.observedTexts.push(attribute.value)
+                  }
+                }
+              }
+            }
+          }
+          if (teacherState.observedTexts.length > 30) teacherState.observedTexts.splice(0, teacherState.observedTexts.length - 30)
+        })
+        doc.__tianyangTeacherObserver.observe(doc.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["title", "data-title", "data-content", "data-original-title", "aria-label", "aria-describedby"],
+        })
+      }
+    } catch (_) {}
+  }
   const tooltipText = documents.flatMap((doc) => {
     try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible).map(nodeText) } catch (_) { return [] }
   }).join("\n")
@@ -193,16 +275,18 @@
   if (teacherState.pendingCode) {
     const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
     const pendingMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
-    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}`)
+    const observedText = teacherState.observedTexts.splice(0).join("\n")
+    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}\n${observedText}`)
     if (found.length) teacherState.teachersByCode[teacherState.pendingCode] = found
     teacherState.scannedCodes[teacherState.pendingCode] = true
     teacherState.pendingCode = ""
   }
 
   for (const course of parsed) {
-    if (course.teachers.length) {
+    const payloadTeachers = teachersFromPayloads(course)
+    if (course.teachers.length || payloadTeachers.length) {
       const existing = teacherState.teachersByCode[course.code] || []
-      teacherState.teachersByCode[course.code] = [...new Set([...existing, ...course.teachers])]
+      teacherState.teachersByCode[course.code] = [...new Set([...existing, ...course.teachers, ...payloadTeachers])]
     }
   }
   for (const course of byPlacement.values()) {
@@ -220,8 +304,18 @@
       && !(teacherState.teachersByCode[course.code] || []).length
       && !teacherState.scannedCodes[course.code])
     if (nextTeacherCourse) {
-      const node = nextTeacherCourse.node
+      const courseNode = nextTeacherCourse.node
+      const hoverChain = []
+      for (let current = courseNode, depth = 0; current && depth < 7; current = current.parentElement, depth += 1) hoverChain.push(current)
+      const node = hoverChain.find((current) => {
+        try {
+          if (current.attributes && [...current.attributes].some((attribute) => /tooltip|popover|content|title/i.test(attribute.name))) return true
+          if (current.matches && current.matches(".course,.course-item,.event,.fc-event,[data-toggle=tooltip],[data-bs-toggle=tooltip]")) return true
+          return current.ownerDocument.defaultView.getComputedStyle(current).cursor === "pointer"
+        } catch (_) { return false }
+      }) || courseNode
       try {
+        teacherState.observedTexts.splice(0)
         node.scrollIntoView({ block: "center", inline: "center", behavior: "auto" })
         const view = node.ownerDocument.defaultView
         const rect = node.getBoundingClientRect()
@@ -261,80 +355,5 @@
       schedule: { term, startsOn, importedAt: new Date().toISOString(), source: "web", courses },
     }
   }
-
-  const nodes = [].concat(...documents.map((doc) => [...doc.querySelectorAll("a,button,input,[role=button],[onclick],[ng-click],[data-url],[data-href],li,span,div,p")])).filter(elementVisible)
-  const target = (node) => {
-    const chain = []
-    for (let current = node, depth = 0; current && depth < 14; depth += 1, current = current.parentElement) chain.push(current)
-    return chain.find((current) => current.matches && current.matches("a[href],button,input,[role=button],[onclick],[ng-click],[data-url],[data-href]"))
-      || chain.find((current) => current.matches && current.matches(".service-item,.app-item,.portal-item,.card,.btn,.menu-item,.dropdown-toggle"))
-      || chain.find((current) => {
-        try { return current.ownerDocument.defaultView.getComputedStyle(current).cursor === "pointer" } catch (_) { return false }
-      })
-      || chain.find((current) => current.matches && current.matches("li,a,button"))
-      || node
-  }
-  const point = (action, node) => {
-    const clickable = target(node)
-    try { clickable.scrollIntoView({ block: "center", inline: "center", behavior: "auto" }) } catch (_) {}
-    const rect = clickable.getBoundingClientRect()
-    let x = rect.left + rect.width / 2
-    let y = rect.top + rect.height / 2
-    let win = clickable.ownerDocument.defaultView
-    while (win !== window && win.frameElement) {
-      const frameRect = win.frameElement.getBoundingClientRect()
-      x += frameRect.left
-      y += frameRect.top
-      win = win.parent
-    }
-    const rawHref = clickable.href || (clickable.getAttribute && (clickable.getAttribute("data-href") || clickable.getAttribute("data-url"))) || ""
-    let href = ""
-    try {
-      const resolved = new URL(rawHref, clickable.ownerDocument.location.href).href
-      if (rawHref && !/^(?:#|javascript:)/i.test(rawHref) && /^https?:/i.test(resolved)) href = resolved
-    } catch (_) {}
-    let domClicked = false
-    const signature = `${action}:${compact(nodeText(clickable)).slice(0, 40)}`
-    const clickState = window.__tianyangScheduleNavigation || (window.__tianyangScheduleNavigation = {})
-    const now = Date.now()
-    if (clickState.signature !== signature) {
-      clickState.signature = signature
-      clickState.count = 0
-      clickState.time = 0
-    }
-    if (!href && now - Number(clickState.time || 0) > 1100 && Number(clickState.count || 0) < 2) {
-      try {
-        const view = clickable.ownerDocument.defaultView
-        const init = { bubbles: true, cancelable: true, view, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
-        if (view.PointerEvent) {
-          clickable.dispatchEvent(new view.PointerEvent("pointerdown", init))
-          clickable.dispatchEvent(new view.PointerEvent("pointerup", init))
-        }
-        clickable.dispatchEvent(new view.MouseEvent("mousedown", init))
-        clickable.dispatchEvent(new view.MouseEvent("mouseup", init))
-        if (typeof clickable.click === "function") clickable.click()
-        else clickable.dispatchEvent(new view.MouseEvent("click", init))
-        domClicked = true
-        clickState.time = now
-        clickState.count = Number(clickState.count || 0) + 1
-      } catch (_) {}
-    } else if (!href && Number(clickState.count || 0) >= 2) {
-      clickState.count = 0
-      clickState.time = now
-    }
-    return { action, x: x / window.innerWidth, y: y / window.innerHeight, href, domClicked, courseCount: courses.length, hasStartDate: Boolean(startsOn) }
-  }
-  const text = (node) => compact(nodeText(node))
-  const exact = (...labels) => nodes.filter((node) => labels.includes(text(node))).sort((a, b) => text(a).length - text(b).length)[0]
-  const contains = (...labels) => nodes.filter((node) => labels.some((label) => text(node).includes(label)) && text(node).length < 36).sort((a, b) => text(a).length - text(b).length)[0]
-
-  const pdf = exact("导出至一个PDF文件", "导出为PDF文件", "导出PDF", "PDF导出") || nodes.find((node) => /导出.*PDF|PDF.*导出/i.test(text(node)) && text(node).length < 36)
-  if (pdf) return point("pdf", pdf)
-  const exportMenu = exact("导出") || nodes.find((node) => /^导出[▼▽▾]?$/.test(text(node)))
-  if (exportMenu) return point("menu", exportMenu)
-  const printSchedule = exact("打印大课表", "大课表", "周课表") || contains("打印大课表")
-  if (printSchedule) return point("print", printSchedule)
-  const schedule = exact("我的课表") || contains("我的课表")
-  if (schedule) return point("schedule", schedule)
   return { action: "none", courseCount: courses.length, hasStartDate: Boolean(startsOn) }
 })()

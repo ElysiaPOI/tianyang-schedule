@@ -28,7 +28,7 @@ import java.io.InputStream;
 
 public final class MainActivity extends Activity {
     private static final int IMPORT_REQUEST = 1101;
-    private static final int PDF_PICKER_REQUEST = 1102;
+    private static final int FILE_PICKER_REQUEST = 1102;
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
 
     private WebView webView;
@@ -39,13 +39,10 @@ public final class MainActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        WebView.enableSlowWholeDocumentDraw();
         getWindow().setStatusBarColor(Color.rgb(245, 247, 251));
         getWindow().setNavigationBarColor(Color.WHITE);
 
         assetLoader = new WebViewAssetLoader.Builder()
-                .addPathHandler("/imported/", new WebViewAssetLoader.InternalStoragePathHandler(
-                        this, new java.io.File(getFilesDir(), "imported")))
                 .addPathHandler("/", this::loadBundledAsset)
                 .build();
 
@@ -70,9 +67,20 @@ public final class MainActivity extends Activity {
 
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("application/pdf");
+                intent.setType("*/*");
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                        "application/pdf",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "application/vnd.ms-excel",
+                        "text/csv",
+                        "text/tab-separated-values",
+                        "text/plain",
+                        "text/calendar",
+                        "text/html",
+                        "application/json"
+                });
                 try {
-                    startActivityForResult(intent, PDF_PICKER_REQUEST);
+                    startActivityForResult(intent, FILE_PICKER_REQUEST);
                     return true;
                 } catch (ActivityNotFoundException ignored) {
                     fileChooserCallback = null;
@@ -105,14 +113,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void deliverImportedPdf(String filename) {
-        String safeFilename = filename == null || filename.trim().isEmpty() ? "学生大课表.pdf" : filename;
-        String url = APP_ORIGIN + "/imported/schedule.pdf";
-        String script = "window.dispatchEvent(new CustomEvent('tianyang:android-pdf-ready',{detail:{url:"
-                + JSONObject.quote(url) + ",filename:" + JSONObject.quote(safeFilename) + "}}));";
-        webView.evaluateJavascript(script, null);
-    }
-
     private void deliverImportedSchedule(String scheduleJson) {
         if (scheduleJson == null || scheduleJson.trim().isEmpty()) return;
         String script = "window.dispatchEvent(new CustomEvent('tianyang:android-schedule-ready',{detail:JSON.parse("
@@ -123,7 +123,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PDF_PICKER_REQUEST) {
+        if (requestCode == FILE_PICKER_REQUEST) {
             ValueCallback<Uri[]> callback = fileChooserCallback;
             fileChooserCallback = null;
             if (callback != null) {
@@ -135,7 +135,6 @@ public final class MainActivity extends Activity {
         if (requestCode == IMPORT_REQUEST && resultCode == RESULT_OK && data != null) {
             String scheduleJson = data.getStringExtra(EducationImportActivity.EXTRA_SCHEDULE_JSON);
             if (scheduleJson != null) deliverImportedSchedule(scheduleJson);
-            else deliverImportedPdf(data.getStringExtra(EducationImportActivity.EXTRA_FILENAME));
         }
     }
 

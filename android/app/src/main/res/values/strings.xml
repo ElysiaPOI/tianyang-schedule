@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">天扬课表</string>
     <string name="import_title">综合教务系统</string>
-    <string name="import_hint">完成登录后点一次下方按钮，应用会自动进入课表并导入。</string>
+    <string name="import_hint">登录后请手动进入“我的课表”，确认周课表已经显示，再点“读取当前课表”。</string>
 </resources>

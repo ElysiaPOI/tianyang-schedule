@@ -33,42 +33,39 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(importer, /onReceivedError/)
   assert.match(importer, /onReceivedHttpError/)
   assert.doesNotMatch(importer, /LOAD_NO_CACHE|clearCache\(true\)|TianyangScheduleImport/)
-  assert.match(importer, /isDlutHost/)
   assert.match(importer, /isDlutHttpUri/)
-  assert.match(importer, /setInstanceFollowRedirects\(false\)/)
-  assert.match(importer, /scheduleAutomationStep/)
-  assert.match(extractor, /打印大课表/)
-  assert.match(extractor, /导出至一个PDF文件/)
+  assert.match(importer, /读取当前课表/)
+  assert.match(importer, /readCurrentSchedule/)
   assert.match(extractor, /action: "data"/)
   assert.match(extractor, /source: "web"/)
   assert.match(extractor, /teacher-wait/)
   assert.match(extractor, /mouseenter/)
   assert.match(extractor, /scrollIntoView/)
-  assert.match(extractor, /domClicked/)
+  assert.match(extractor, /MutationObserver/)
+  assert.match(extractor, /__tianyangScheduleNetworkPayloads/)
   assert.match(importer, /EXTRA_SCHEDULE_JSON/)
   assert.match(importer, /isValidExtractedSchedule/)
   assert.match(main, /tianyang:android-schedule-ready/)
-  assert.match(importer, /WebViewCompat\.addWebMessageListener/)
-  assert.match(importer, /WebViewFeature\.WEB_MESSAGE_LISTENER/)
-  assert.match(importer, /MotionEvent\.ACTION_DOWN/)
-  assert.match(importer, /capturePicture/)
-  assert.match(importer, /document\.startPage\(0\)/)
-  assert.match(importer, /PrintedPdfDocument/)
-  assert.match(importer, /enableSlowWholeDocumentDraw/)
+  assert.match(importer, /WebViewCompat\.addDocumentStartJavaScript/)
+  assert.match(importer, /WebViewFeature\.DOCUMENT_START_SCRIPT/)
+  assert.match(importer, /MotionEvent\.ACTION_HOVER_MOVE/)
   assert.match(importer, /removeAllCookies/)
-  assert.match(importer, /%PDF-/)
+  assert.doesNotMatch(importer, /PrintedPdfDocument|capturePicture|DownloadListener|scheduleAutomationStep/)
+  assert.doesNotMatch(extractor, /打印大课表|导出至一个PDF文件|domClicked|action: "schedule"|action: "pdf"/)
   assert.match(network, /base-config cleartextTrafficPermitted="true"/)
   assert.match(network, /includeSubdomains="true">dlut\.edu\.cn/)
   assert.doesNotMatch(importer, /password|passwd|账号密码/i)
 })
 
-test("web app accepts a PDF delivered by the native bridge", async () => {
+test("web app exposes exactly webpage reading and local file import", async () => {
   const source = await read("app/schedule-app.tsx")
-  assert.match(source, /tianyang:android-pdf-ready/)
   assert.match(source, /openTeachingSystem/)
-  assert.match(source, /教务系统导入/)
+  assert.match(source, /教务系统读取/)
+  assert.match(source, /从文件导入/)
+  assert.match(source, /parseScheduleFile/)
   assert.match(source, /tianyang:android-schedule-ready/)
   assert.match(source, /scheduleFromTeachingSystem/)
+  assert.doesNotMatch(source, /tianyang:android-pdf-ready|importPdf/)
 })
 
 test("teaching-system extractor reads course cards without exporting PDF", async () => {
@@ -153,69 +150,52 @@ test("teaching-system extractor collects teacher names from hover details", asyn
   assert.deepEqual([...second.schedule.courses[0].teachers], ["张三"])
 })
 
-test("teaching-system extractor activates the real schedule card", async () => {
+test("teaching-system extractor reads teachers captured from schedule responses", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
-  let clicks = 0
-  class TestEvent {
-    constructor(type) { this.type = type }
-  }
-  const window = {
-    innerWidth: 1000,
-    innerHeight: 1000,
-    parent: null,
-    PointerEvent: TestEvent,
-    MouseEvent: TestEvent,
-    getComputedStyle: (node) => ({ display: "block", visibility: "visible", opacity: "1", cursor: node.isCard ? "pointer" : "default" }),
-  }
-  window.parent = window
+  const block = (innerText) => ({ innerText, value: "", textContent: innerText, children: [], querySelectorAll: () => [] })
+  const cards = [
+    block("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 2 (1,2)"),
+    block("1000000000002.01\n测试课程乙\n教学楼 A102 (1~10周) 3 (3,4)"),
+    block("1000000000003.01\n测试课程丙\n教学楼 A103 (1~10周) 4 (5,6)"),
+  ]
+  const window = { __tianyangScheduleNetworkPayloads: [JSON.stringify([
+    { courseCode: "1000000000001.01", courseName: "测试课程甲", teacherName: "张三" },
+    { courseCode: "1000000000002.01", courseName: "测试课程乙", jsmc: "李四" },
+    { courseCode: "1000000000003.01", courseName: "测试课程丙", instructor: "王五" },
+  ])] }
   const document = {
-    body: { innerText: "综合教学管理系统" },
-    documentElement: { innerHTML: "" },
-    defaultView: window,
-    location: { href: "http://jxgl.dlut.edu.cn/student/home" },
+    body: { innerText: "2026-2027学年第一学期\n第1周 2026-08-31—2026-09-06" },
+    documentElement: { innerHTML: "2026-2027学年第一学期 2026-08-31" },
+    querySelectorAll: (selector) => selector === "iframe" ? [] : selector.startsWith("td,") ? cards : [],
   }
-  const card = {
-    isCard: true,
-    innerText: "我的课表",
-    textContent: "我的课表",
-    value: "",
-    parentElement: null,
-    ownerDocument: document,
-    matches: (selector) => selector.includes(".service-item"),
-    getAttribute: () => "",
-    getBoundingClientRect: () => ({ left: 100, top: 200, width: 200, height: 100 }),
-    scrollIntoView: () => {},
-    dispatchEvent: () => {},
-    click: () => { clicks += 1 },
-  }
-  const label = {
-    innerText: "我的课表",
-    textContent: "我的课表",
-    value: "",
-    parentElement: card,
-    ownerDocument: document,
-    matches: () => false,
-    getBoundingClientRect: () => ({ left: 120, top: 220, width: 100, height: 40 }),
-  }
-  document.querySelectorAll = (selector) => {
-    if (selector === "iframe" || selector.startsWith("td,") || selector.includes("[role=tooltip]")) return []
-    if (selector.startsWith("a,button")) return [label]
-    return []
-  }
-  const result = vm.runInNewContext(source, { document, window, URL, Date, Map, Set })
-  assert.equal(result.action, "schedule")
-  assert.equal(result.domClicked, true)
-  assert.equal(clicks, 1)
+  const result = vm.runInNewContext(source, { document, window, Date, Map, Set })
+  assert.equal(result.action, "data")
+  assert.deepEqual([...result.schedule.courses[0].teachers], ["张三"])
+  assert.deepEqual([...result.schedule.courses[1].teachers], ["李四"])
+  assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
 })
 
-test("android webview opens the system PDF picker", async () => {
+test("android webview opens a multi-format document picker", async () => {
   const main = await read("android/app/src/main/java/com/elysiapoi/tianyangschedule/MainActivity.java")
   assert.match(main, /onShowFileChooser/)
   assert.match(main, /Intent\.ACTION_OPEN_DOCUMENT/)
-  assert.match(main, /setType\("application\/pdf"\)/)
-  assert.match(main, /PDF_PICKER_REQUEST/)
+  assert.match(main, /setType\("\*\/\*"\)/)
+  assert.match(main, /Intent\.EXTRA_MIME_TYPES/)
+  assert.match(main, /FILE_PICKER_REQUEST/)
+  assert.match(main, /spreadsheetml|text\/csv|text\/calendar/)
   assert.match(main, /FileChooserParams\.parseResult/)
   assert.match(main, /setAllowContentAccess\(true\)/)
+})
+
+test("local schedule importer supports common course file formats", async () => {
+  const source = await read("lib/schedule-file-parser.ts")
+  assert.match(source, /parseDlutSchedulePdf/)
+  assert.match(source, /parseXlsx/)
+  assert.match(source, /parseDelimited/)
+  assert.match(source, /parseIcs/)
+  assert.match(source, /parseHtmlTable/)
+  assert.match(source, /parseJson/)
+  assert.match(source, /暂不支持旧版二进制 XLS/)
 })
 
 test("PDF import uses the legacy build for older Android WebViews", async () => {

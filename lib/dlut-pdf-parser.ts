@@ -51,20 +51,21 @@ function nearestWeek(center: number, headers: { week: number; center: number }[]
 
 export function parseDlutPositionedText(items: PositionedText[], importedAt = new Date().toISOString()): Schedule {
   const allText = groupLines(items).map((line) => line.text).join("\n")
-  const term = allText.match(/\d{4}-\d{4}学年第[一二]学期/)?.[0] ?? "当前学期"
-  const startMatch = allText.match(/自(\d{4})[-年](\d{2})[-月](\d{2})(?:日)?开始执行/)
+  const term = allText.match(/\d{4}\s*-\s*\d{4}\s*学年\s*第[一二12]\s*学期/)?.[0]
+    ?.replace(/\s+/g, "").replace("第1学期", "第一学期").replace("第2学期", "第二学期") ?? "当前学期"
+  const startMatch = allText.match(/(?:自|开始日期|开学日期|起始日期)[^\d]{0,20}(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日)?(?:开始执行)?/)
   if (!startMatch) throw new Error("没有识别到学期开始日期，请确认文件来自“学生大课表”")
-  const startsOn = `${startMatch[1]}-${startMatch[2]}-${startMatch[3]}`
+  const startsOn = `${startMatch[1]}-${String(startMatch[2]).padStart(2, "0")}-${String(startMatch[3]).padStart(2, "0")}`
 
   const metadata = parseMetadata(items)
   const weekHeaders = items
-    .filter((item) => /^(0[1-9]|1\d|2[0-6])$/.test(item.text.trim()) && item.top > 85 && item.top < 115)
+    .filter((item) => /^(?:0?[1-9]|[12]\d|30)$/.test(item.text.trim()) && item.top > 75 && item.top < 130)
     .map((item) => ({ week: Number(item.text), center: item.x + item.width / 2 }))
     .sort((a, b) => a.week - b.week)
   if (weekHeaders.length < 20) throw new Error("课表周次结构识别失败")
 
   const rowItems = items
-    .filter((item) => item.x > 45 && item.x < 95 && /^(1~2|3~4|5~6|7~8|9~12)$/.test(item.text.trim()))
+    .filter((item) => item.x > 35 && item.x < 110 && /^(1[~—–-]2|3[~—–-]4|5[~—–-]6|7[~—–-]8|9[~—–-]12)$/.test(item.text.trim()))
     .sort((a, b) => a.top - b.top)
   if (rowItems.length < 35) throw new Error("课表节次结构识别失败")
 
@@ -135,15 +136,38 @@ export async function parseDlutSchedulePdf(file: File): Promise<Schedule> {
   ])
   GlobalWorkerOptions.workerSrc = workerModule.default
   const document = await getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise
-  if (document.numPages !== 1) throw new Error("目前只支持学校导出的单页学生大课表")
+  const pages: PositionedText[][] = []
+  const combined: PositionedText[] = []
+  let pageOffset = 0
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber)
+    const content = await page.getTextContent()
+    const pageWidth = page.view[2] - page.view[0]
+    const pageHeight = page.view[3] - page.view[1]
+    const scale = 1191 / pageWidth
+    const items: PositionedText[] = content.items.flatMap((raw) => {
+      if (!("str" in raw) || !raw.str.trim()) return []
+      const height = Math.max(Math.abs(raw.transform[3]), raw.height || 0)
+      return [{
+        text: raw.str,
+        x: raw.transform[4] * scale,
+        top: (pageHeight - raw.transform[5] - height) * scale,
+        width: raw.width * scale,
+      }]
+    })
+    pages.push(items)
+    combined.push(...items.map((item) => ({ ...item, top: item.top + pageOffset })))
+    pageOffset += pageHeight * scale + 80
+  }
 
-  const page = await document.getPage(1)
-  const content = await page.getTextContent()
-  const pageHeight = page.view[3] - page.view[1]
-  const items: PositionedText[] = content.items.flatMap((raw) => {
-    if (!("str" in raw) || !raw.str.trim()) return []
-    const height = Math.max(Math.abs(raw.transform[3]), raw.height || 0)
-    return [{ text: raw.str, x: raw.transform[4], top: pageHeight - raw.transform[5] - height, width: raw.width }]
-  })
-  return parseDlutPositionedText(items)
+  let lastError: unknown = null
+  for (const items of pages) {
+    try { return parseDlutPositionedText(items) }
+    catch (error) { lastError = error }
+  }
+  if (pages.length > 1) {
+    try { return parseDlutPositionedText(combined) }
+    catch (error) { lastError = error }
+  }
+  throw lastError instanceof Error ? lastError : new Error("PDF 中没有识别到学生大课表")
 }
