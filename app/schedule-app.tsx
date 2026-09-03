@@ -28,6 +28,7 @@ declare global {
 }
 
 type AndroidPdfReadyEvent = CustomEvent<{ url?: string; filename?: string }>
+type AndroidScheduleReadyEvent = CustomEvent<unknown>
 
 const storageKey = "tianyang-schedule-v1"
 const colors = ["course-blue", "course-violet", "course-cyan", "course-emerald", "course-amber", "course-rose", "course-indigo", "course-slate"]
@@ -157,6 +158,13 @@ function scheduleFromBackup(value: unknown): Schedule | null {
   const schedule = value.schedule
   if (typeof schedule.term !== "string" || typeof schedule.startsOn !== "string" || typeof schedule.importedAt !== "string" || !Array.isArray(schedule.courses) || !schedule.courses.every(isCourseBackup)) return null
   return schedule as unknown as Schedule
+}
+
+function scheduleFromTeachingSystem(value: unknown): Schedule | null {
+  if (!isRecord(value) || typeof value.term !== "string" || !/^20\d{2}-\d{2}-\d{2}$/.test(String(value.startsOn))
+    || typeof value.importedAt !== "string" || value.source !== "web" || !Array.isArray(value.courses)
+    || value.courses.length < 3 || !value.courses.every(isCourseBackup)) return null
+  return value as unknown as Schedule
 }
 
 const shortCourseNames: Record<string, string> = {
@@ -511,6 +519,19 @@ export default function ScheduleApp() {
   })
 
   useEffect(() => {
+    const receiveAndroidSchedule = (event: Event) => {
+      const parsed = scheduleFromTeachingSystem((event as AndroidScheduleReadyEvent).detail)
+      if (!parsed) {
+        toast.error("教务系统返回的网页课表数据不完整")
+        return
+      }
+      applyImportedSchedule(parsed)
+    }
+    window.addEventListener("tianyang:android-schedule-ready", receiveAndroidSchedule)
+    return () => window.removeEventListener("tianyang:android-schedule-ready", receiveAndroidSchedule)
+  })
+
+  useEffect(() => {
     const update = () => setNow(new Date())
     update()
     const timer = window.setInterval(update, 30000)
@@ -532,6 +553,27 @@ export default function ScheduleApp() {
   function saveSchedule(next: Schedule) {
     localStorage.setItem(storageKey, JSON.stringify(next))
     setSchedule(next)
+  }
+
+  function applyImportedSchedule(parsed: Schedule, toastId?: string | number) {
+    const manualCourses = schedule.courses.filter((course) => course.custom)
+    const previousById = new Map(schedule.courses.map((course) => [course.id, course]))
+    const signature = (course: Course) => `${course.code ?? course.name}-${course.day}-${course.startSection}-${course.endSection}`
+    const previousBySignature = new Map(schedule.courses.filter((course) => !course.custom).map((course) => [signature(course), course]))
+    const importedCourses = parsed.courses.map((course) => {
+      const previous = previousById.get(course.id) ?? previousBySignature.get(signature(course))
+      return {
+        ...course,
+        teachers: course.teachers.length ? course.teachers : previous?.teachers ?? [],
+        note: previous?.note,
+        overrides: previous?.overrides,
+      }
+    })
+    saveSchedule({ ...parsed, courses: [...importedCourses, ...manualCourses] })
+    setWeek(currentWeek(parsed.startsOn))
+    setSelectedDay(dayOfWeek())
+    setView("day")
+    toast.success(`成功更新 ${parsed.courses.length} 条上课安排`, toastId === undefined ? undefined : { id: toastId })
   }
 
   function addCourse(draft: DraftCourse) {
@@ -707,14 +749,7 @@ export default function ScheduleApp() {
     const toastId = toast.loading("正在识别新学期课表…")
     try {
       const parsed = await parseDlutSchedulePdf(file)
-      const manualCourses = schedule.courses.filter((course) => course.custom)
-      const previousById = new Map(schedule.courses.map((course) => [course.id, course]))
-      const importedCourses = parsed.courses.map((course) => ({ ...course, note: previousById.get(course.id)?.note, overrides: previousById.get(course.id)?.overrides }))
-      saveSchedule({ ...parsed, courses: [...importedCourses, ...manualCourses] })
-      setWeek(currentWeek(parsed.startsOn))
-      setSelectedDay(dayOfWeek())
-      setView("day")
-      toast.success(`成功更新 ${parsed.courses.length} 条上课安排`, { id: toastId })
+      applyImportedSchedule(parsed, toastId)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "课表识别失败", { id: toastId, duration: 6000 })
     } finally { if (fileInput.current) fileInput.current.value = "" }

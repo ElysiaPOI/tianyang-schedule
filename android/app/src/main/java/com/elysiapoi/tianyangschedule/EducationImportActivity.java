@@ -41,8 +41,10 @@ import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -54,6 +56,7 @@ import java.util.Set;
 
 public final class EducationImportActivity extends Activity {
     public static final String EXTRA_FILENAME = "filename";
+    public static final String EXTRA_SCHEDULE_JSON = "schedule_json";
     private static final String LOGIN_URL = "http://jxgl.dlut.edu.cn/student/home";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -68,6 +71,7 @@ public final class EducationImportActivity extends Activity {
     private int automationAttempts;
     private int failedCriticalAssetCount;
     private String firstFailedAssetHost;
+    private String scheduleExtractorScript;
     private final Runnable automationRunnable = () -> {
         if (importFlowActive && !awaitingPdfDownload && !downloading && webView != null) {
             runAutomationStep();
@@ -123,6 +127,7 @@ public final class EducationImportActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         setContentView(root);
+        scheduleExtractorScript = readScheduleExtractorScript();
         configureWebView();
         configurePdfBridge();
         webView.loadUrl(LOGIN_URL);
@@ -299,32 +304,25 @@ public final class EducationImportActivity extends Activity {
             return;
         }
 
-        String script = "(() => {"
-                + "const docs=[document];"
-                + "for(const f of document.querySelectorAll('iframe')){try{if(f.contentDocument)docs.push(f.contentDocument)}catch(e){}}"
-                + "const text=n=>String(n.innerText||n.value||n.textContent||'').replace(/\\s+/g,'').trim();"
-                + "const visible=n=>{const w=n.ownerDocument.defaultView,s=w.getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<w.innerHeight&&r.left<w.innerWidth};"
-                + "const nodes=[].concat(...docs.map(d=>[...d.querySelectorAll('a,button,input,[role=button],[onclick],li,span,div,p')])).filter(visible);"
-                + "const target=n=>{let c=n;for(let i=0;c&&i<12;i++,c=c.parentElement){const w=c.ownerDocument.defaultView,s=w.getComputedStyle(c);if(c.matches('a,button,input,[role=button],[onclick],li,.btn,.menu-item,.dropdown-toggle')||s.cursor==='pointer')return c}return n};"
-                + "const point=(action,n)=>{n=target(n);const r=n.getBoundingClientRect();let x=r.left+r.width/2,y=r.top+r.height/2,w=n.ownerDocument.defaultView;while(w!==window&&w.frameElement){const fr=w.frameElement.getBoundingClientRect();x+=fr.left;y+=fr.top;w=w.parent}return {action,x:x/window.innerWidth,y:y/window.innerHeight}};"
-                + "const exact=(...labels)=>nodes.filter(n=>labels.includes(text(n))).sort((a,b)=>text(a).length-text(b).length)[0];"
-                + "const contains=(...labels)=>nodes.filter(n=>labels.some(v=>text(n).includes(v))&&text(n).length<36).sort((a,b)=>text(a).length-text(b).length)[0];"
-                + "const pdf=exact('导出至一个PDF文件','导出为PDF文件','导出PDF','PDF导出')||nodes.find(n=>/导出.*PDF|PDF.*导出/i.test(text(n))&&text(n).length<36);"
-                + "if(pdf)return point('pdf',pdf);"
-                + "const exportMenu=exact('导出')||nodes.find(n=>/^导出[▼▽▾]?$/.test(text(n)));"
-                + "if(exportMenu)return point('menu',exportMenu);"
-                + "const printSchedule=exact('打印大课表','大课表','周课表')||contains('打印大课表');"
-                + "if(printSchedule)return point('print',printSchedule);"
-                + "const schedule=exact('我的课表')||contains('我的课表');"
-                + "if(schedule)return point('schedule',schedule);"
-                + "return {action:'none'};})()";
-        webView.evaluateJavascript(script, result -> {
+        if (scheduleExtractorScript == null) {
+            failNativePdf("课表读取组件加载失败");
+            return;
+        }
+        webView.evaluateJavascript(scheduleExtractorScript, result -> {
             if (!importFlowActive || downloading) return;
             try {
                 JSONObject target = new JSONObject(result);
                 String action = target.optString("action", "none");
+                if ("data".equals(action)) {
+                    JSONObject schedule = target.optJSONObject("schedule");
+                    if (!isValidExtractedSchedule(schedule)) throw new Exception("网页课表数据不完整");
+                    status.setText("已读取网页课表，正在导入…");
+                    finishWithImportedSchedule(schedule.toString());
+                    return;
+                }
                 if ("none".equals(action)) {
-                    status.setText("正在等待课表页面加载…");
+                    int count = target.optInt("courseCount", 0);
+                    status.setText(count > 0 ? "已找到课程，正在确认学期日期…" : "正在等待课表页面加载…");
                     scheduleAutomationStep(900);
                     return;
                 }
@@ -332,7 +330,9 @@ public final class EducationImportActivity extends Activity {
                 float y = (float) target.optDouble("y", -1);
                 if (x < 0 || y < 0 || x > 1 || y > 1) throw new Exception("按钮位置异常");
                 installPdfCaptureHook();
-                tapWebView(x, y);
+                String href = target.optString("href", "");
+                if (!href.isEmpty() && isDlutHttpUri(Uri.parse(href))) webView.loadUrl(href);
+                else tapWebView(x, y);
                 if ("pdf".equals(action)) {
                     awaitingPdfDownload = true;
                     status.setText("正在请求教务系统导出 PDF…");
@@ -356,6 +356,43 @@ public final class EducationImportActivity extends Activity {
                 scheduleAutomationStep(900);
             }
         });
+    }
+
+    private String readScheduleExtractorScript() {
+        try (InputStream input = getResources().openRawResource(R.raw.dlut_schedule_extractor);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            return output.toString(StandardCharsets.UTF_8.name());
+        } catch (Exception error) {
+            Log.e("TianyangImport", "Schedule extractor unavailable", error);
+            return null;
+        }
+    }
+
+    private boolean isValidExtractedSchedule(@Nullable JSONObject schedule) {
+        if (schedule == null) return false;
+        String startsOn = schedule.optString("startsOn", "");
+        JSONArray courses = schedule.optJSONArray("courses");
+        if (!startsOn.matches("20\\d{2}-\\d{2}-\\d{2}") || courses == null || courses.length() < 3) return false;
+        for (int index = 0; index < courses.length(); index++) {
+            JSONObject course = courses.optJSONObject(index);
+            if (course == null || course.optString("name", "").trim().isEmpty()
+                    || course.optInt("day", 0) < 1 || course.optInt("day", 0) > 7
+                    || course.optInt("startSection", 0) < 1 || course.optInt("endSection", 0) > 12
+                    || course.optJSONArray("weeks") == null || course.optJSONArray("weeks").length() == 0) return false;
+        }
+        return true;
+    }
+
+    private void finishWithImportedSchedule(String scheduleJson) {
+        importFlowActive = false;
+        awaitingPdfDownload = false;
+        mainHandler.removeCallbacks(automationRunnable);
+        Intent result = new Intent().putExtra(EXTRA_SCHEDULE_JSON, scheduleJson);
+        setResult(RESULT_OK, result);
+        finish();
     }
 
     private void tapWebView(float xRatio, float yRatio) {

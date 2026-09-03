@@ -113,6 +113,13 @@ public final class MainActivity extends Activity {
         webView.evaluateJavascript(script, null);
     }
 
+    private void deliverImportedSchedule(String scheduleJson) {
+        if (scheduleJson == null || scheduleJson.trim().isEmpty()) return;
+        String script = "window.dispatchEvent(new CustomEvent('tianyang:android-schedule-ready',{detail:JSON.parse("
+                + JSONObject.quote(scheduleJson) + ")}));";
+        webView.evaluateJavascript(script, null);
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -126,7 +133,9 @@ public final class MainActivity extends Activity {
             return;
         }
         if (requestCode == IMPORT_REQUEST && resultCode == RESULT_OK && data != null) {
-            deliverImportedPdf(data.getStringExtra(EducationImportActivity.EXTRA_FILENAME));
+            String scheduleJson = data.getStringExtra(EducationImportActivity.EXTRA_SCHEDULE_JSON);
+            if (scheduleJson != null) deliverImportedSchedule(scheduleJson);
+            else deliverImportedPdf(data.getStringExtra(EducationImportActivity.EXTRA_FILENAME));
         }
     }
 
