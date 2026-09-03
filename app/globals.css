@@ -215,7 +215,22 @@ button { font: inherit; }
   transform: translateX(-50%);
 }
 
-.schedule-tabs { padding: 18px 26px 8px; touch-action: pan-y; }
+.schedule-tabs { overflow-x: clip; padding: 18px 26px 8px; touch-action: pan-y; }
+.schedule-view { will-change: transform, opacity; }
+.schedule-tabs[data-motion="forward"] .schedule-view[data-state="active"] {
+  animation: schedule-view-in-forward .21s cubic-bezier(.22, 1, .36, 1) both;
+}
+.schedule-tabs[data-motion="backward"] .schedule-view[data-state="active"] {
+  animation: schedule-view-in-backward .21s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes schedule-view-in-forward {
+  from { opacity: .35; transform: translateX(18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes schedule-view-in-backward {
+  from { opacity: .35; transform: translateX(-18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 .view-tabs {
   width: 210px;
   height: 40px !important;
@@ -572,4 +587,5 @@ footer button { border: 0; color: #245ba8; background: transparent; font-weight:
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .01ms !important; }
+  .schedule-view { will-change: auto; }
 }

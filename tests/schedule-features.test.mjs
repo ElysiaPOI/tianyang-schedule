@@ -11,8 +11,11 @@ test("schedule view supports horizontal swipes", async () => {
   ])
   assert.match(source, /startViewSwipe/)
   assert.match(source, /finishViewSwipe/)
-  assert.match(source, /dx < 0 \? "week" : "day"/)
+  assert.match(source, /changeView\(dx < 0 \? "week" : "day"\)/)
   assert.match(css, /touch-action:\s*pan-y/)
+  assert.match(css, /schedule-view-in-forward/)
+  assert.match(css, /schedule-view-in-backward/)
+  assert.match(css, /\.21s cubic-bezier/)
 })
 
 test("current day is outlined in the weekly timetable", async () => {
@@ -22,7 +25,7 @@ test("current day is outlined in the weekly timetable", async () => {
   ])
   assert.match(source, /week === todayWeek/)
   assert.match(source, /today-column-highlight/)
-  assert.match(source, /gridColumn: todayDay \+ 1/)
+  assert.match(source, /gridColumn: `\$\{todayDay \+ 1\} \/ \$\{todayDay \+ 2\}`/)
   assert.match(css, /\.today-column-highlight/)
   assert.match(css, /border:\s*2px dashed/)
 })

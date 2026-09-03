@@ -462,6 +462,7 @@ export default function ScheduleApp() {
   const [week, setWeek] = useState(() => currentWeek(initialSchedule.startsOn))
   const [selectedDay, setSelectedDay] = useState(() => dayOfWeek())
   const [view, setView] = useState<"day" | "week">("day")
+  const [viewMotion, setViewMotion] = useState<"none" | "forward" | "backward">("none")
   const [now, setNow] = useState<Date | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [addContext, setAddContext] = useState(() => ({ day: dayOfWeek(), slot: 1, fromBlank: false }))
@@ -660,7 +661,13 @@ export default function ScheduleApp() {
     const today = new Date()
     setWeek(currentWeek(schedule.startsOn, today))
     setSelectedDay(dayOfWeek(today))
-    setView("day")
+    changeView("day")
+  }
+
+  function changeView(nextView: "day" | "week") {
+    if (nextView === view) return
+    setViewMotion(nextView === "week" ? "forward" : "backward")
+    setView(nextView)
   }
 
   function startViewSwipe(event: TouchEvent<HTMLDivElement>) {
@@ -676,7 +683,7 @@ export default function ScheduleApp() {
     const dx = touch.clientX - start.x
     const dy = touch.clientY - start.y
     if (Math.abs(dx) < 52 || Math.abs(dx) <= Math.abs(dy) * 1.25) return
-    setView(dx < 0 ? "week" : "day")
+    changeView(dx < 0 ? "week" : "day")
   }
 
   function openAddCourse(day: number, slot = 1, fromBlank = false) {
@@ -744,12 +751,12 @@ export default function ScheduleApp() {
         })}
       </div>
 
-      <Tabs value={view} onValueChange={(value) => setView(value as "day" | "week")} className="schedule-tabs" onTouchStart={startViewSwipe} onTouchEnd={finishViewSwipe} onTouchCancel={() => { viewSwipeStart.current = null }}>
+      <Tabs value={view} onValueChange={(value) => changeView(value as "day" | "week")} className="schedule-tabs" data-motion={viewMotion} onTouchStart={startViewSwipe} onTouchEnd={finishViewSwipe} onTouchCancel={() => { viewSwipeStart.current = null }}>
         <div className="view-toolbar">
           <TabsList className="view-tabs"><TabsTrigger value="day"><Clock3 />单日</TabsTrigger><TabsTrigger value="week"><CalendarDays />周课表</TabsTrigger></TabsList>
           {awayFromToday && <Button type="button" size="sm" variant="ghost" className="today-button" onClick={returnToToday}><RotateCcw />回到今天</Button>}
         </div>
-        <TabsContent value="day" className="day-view">
+        <TabsContent value="day" className="schedule-view day-view">
           <div className="section-heading"><div><span>{dayNames[selectedDay - 1]}</span><h2>{selectedDate.getMonth() + 1}月{selectedDate.getDate()}日</h2></div><small>{selectedCourses.length} 门课</small></div>
           <div className="daily-timeline">
             {timeSlots.map((slot, index) => {
@@ -762,10 +769,10 @@ export default function ScheduleApp() {
             })}
           </div>
         </TabsContent>
-        <TabsContent value="week" className="week-view">
+        <TabsContent value="week" className="schedule-view week-view">
           <div className="timetable-wrap">
             <div className="timetable">
-              {now && week === todayWeek && <div className="today-column-highlight" style={{ gridColumn: todayDay + 1, gridRow: "1 / -1" }} aria-hidden="true" />}
+              {now && week === todayWeek && <div className="today-column-highlight" style={{ gridColumn: `${todayDay + 1} / ${todayDay + 2}`, gridRow: "1 / -1" }} aria-hidden="true" />}
               <div className="table-corner"><Clock3 /></div>
               {dayNames.map((name, index) => <div className="table-day" key={name}><span>{name}</span><strong>{dateForWeekday(schedule.startsOn, week, index + 1).getDate()}</strong></div>)}
               {timeSlots.map((slot, slotIndex) => [
