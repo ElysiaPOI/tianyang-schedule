@@ -32,13 +32,37 @@
 
   const attributeText = (node) => {
     const values = []
-    for (const current of [node, ...node.querySelectorAll("[title],[data-title],[data-content],[data-original-title]")]) {
-      for (const name of ["title", "data-title", "data-content", "data-original-title"]) {
+    const descendants = node.querySelectorAll ? [...node.querySelectorAll("[title],[data-title],[data-content],[data-original-title],[aria-label],[aria-describedby]")] : []
+    const ancestors = []
+    for (let current = node && node.parentElement, depth = 0; current && depth < 8; current = current.parentElement, depth += 1) ancestors.push(current)
+    for (const current of [node, ...descendants, ...ancestors]) {
+      for (const name of ["title", "data-title", "data-content", "data-original-title", "aria-label"]) {
         const value = current.getAttribute && current.getAttribute(name)
         if (value) values.push(value)
       }
+      if (current.attributes) {
+        for (const attribute of current.attributes) {
+          if (/teacher|tooltip|popover|content|title/i.test(attribute.name) && attribute.value) values.push(attribute.value)
+        }
+      }
+      const describedBy = current.getAttribute && current.getAttribute("aria-describedby")
+      if (describedBy && current.ownerDocument) {
+        for (const id of describedBy.split(/\s+/)) {
+          const description = current.ownerDocument.getElementById(id)
+          if (description) values.push(nodeText(description))
+        }
+      }
     }
     return clean(values.join("\n"))
+  }
+
+  const extractTeachers = (value) => {
+    const result = []
+    const source = clean(value)
+    for (const match of source.matchAll(/(?:任课教师|授课教师|主讲教师|教师姓名|教师|老师)[:： \t]*([\u3400-\u9fff·、，, \t]{2,50})/g)) {
+      result.push(...match[1].split(/[、，,\s]+/))
+    }
+    return [...new Set(result.map(clean).filter((name) => /^[\u3400-\u9fff·]{2,8}$/.test(name) && !/^(任课|授课|主讲|教师|老师|姓名|上课|默认组)$/.test(name)))]
   }
 
   const courseNodes = []
@@ -84,12 +108,10 @@
     if (!name || name.length > 60) continue
 
     const metadata = `${raw}\n${attributeText(node)}`
-    const teachers = [...metadata.matchAll(/(?:任课教师|教师|老师)[:：\s]*([\u3400-\u9fff·、，,\s]{2,40})/g)]
-      .flatMap((match) => match[1].split(/[、，,\s]+/))
-      .map(clean)
-      .filter((value) => /^[\u3400-\u9fff·]{2,8}$/.test(value))
+    const teachers = extractTeachers(metadata)
 
     parsed.push({
+      node,
       code,
       name,
       teachers: [...new Set(teachers)],
@@ -102,7 +124,7 @@
   }
 
   const byPlacement = new Map()
-  for (const course of parsed) {
+  for (const { node, ...course } of parsed) {
     const key = `${course.code}-${course.day}-${course.startSection}-${course.endSection}-${course.room}`
     const existing = byPlacement.get(key)
     if (existing) {
@@ -145,6 +167,48 @@
     }
   }
 
+  const teacherState = window.__tianyangScheduleTeacherScan || (window.__tianyangScheduleTeacherScan = {
+    teachersByCode: {},
+    scannedCodes: {},
+    pendingCode: "",
+  })
+
+  const tooltipSelectors = [
+    "[role=tooltip]", ".tooltip", ".tooltip-inner", ".popover", ".popover-content",
+    ".el-tooltip__popper", ".ant-tooltip", ".ant-popover", ".ivu-tooltip-popper",
+    ".layui-layer-tips", ".qtip", ".webui-popover",
+  ].join(",")
+  const elementVisible = (node) => {
+    try {
+      const win = node.ownerDocument.defaultView
+      const style = win.getComputedStyle(node)
+      const rect = node.getBoundingClientRect()
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0
+    } catch (_) { return false }
+  }
+  const tooltipText = documents.flatMap((doc) => {
+    try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible).map(nodeText) } catch (_) { return [] }
+  }).join("\n")
+
+  if (teacherState.pendingCode) {
+    const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
+    const pendingMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
+    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}`)
+    if (found.length) teacherState.teachersByCode[teacherState.pendingCode] = found
+    teacherState.scannedCodes[teacherState.pendingCode] = true
+    teacherState.pendingCode = ""
+  }
+
+  for (const course of parsed) {
+    if (course.teachers.length) {
+      const existing = teacherState.teachersByCode[course.code] || []
+      teacherState.teachersByCode[course.code] = [...new Set([...existing, ...course.teachers])]
+    }
+  }
+  for (const course of byPlacement.values()) {
+    course.teachers = [...new Set([...(course.teachers || []), ...(teacherState.teachersByCode[course.code] || [])])]
+  }
+
   const courses = [...byPlacement.values()].map((course) => ({
     id: `${course.code}-${course.day}-${course.startSection}-${course.endSection}-${compact(course.room)}`,
     ...course,
@@ -152,29 +216,67 @@
   })).sort((a, b) => a.day - b.day || a.startSection - b.startSection || a.name.localeCompare(b.name, "zh-CN"))
 
   if (courses.length >= 3 && /^20\d{2}-\d{2}-\d{2}$/.test(startsOn)) {
+    const nextTeacherCourse = parsed.find((course) => !course.teachers.length
+      && !(teacherState.teachersByCode[course.code] || []).length
+      && !teacherState.scannedCodes[course.code])
+    if (nextTeacherCourse) {
+      const node = nextTeacherCourse.node
+      try {
+        node.scrollIntoView({ block: "center", inline: "center", behavior: "auto" })
+        const view = node.ownerDocument.defaultView
+        const rect = node.getBoundingClientRect()
+        const init = { bubbles: true, cancelable: true, view, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
+        if (view.PointerEvent) {
+          node.dispatchEvent(new view.PointerEvent("pointerover", init))
+          node.dispatchEvent(new view.PointerEvent("pointermove", init))
+        }
+        node.dispatchEvent(new view.MouseEvent("mouseenter", { ...init, bubbles: false }))
+        node.dispatchEvent(new view.MouseEvent("mouseover", init))
+        node.dispatchEvent(new view.MouseEvent("mousemove", init))
+        if (typeof node.focus === "function") node.focus({ preventScroll: true })
+        teacherState.pendingCode = nextTeacherCourse.code
+        let hoverX = rect.left + rect.width / 2
+        let hoverY = rect.top + rect.height / 2
+        let hoverWindow = node.ownerDocument.defaultView
+        while (hoverWindow !== window && hoverWindow.frameElement) {
+          const frameRect = hoverWindow.frameElement.getBoundingClientRect()
+          hoverX += frameRect.left
+          hoverY += frameRect.top
+          hoverWindow = hoverWindow.parent
+        }
+        return {
+          action: "teacher-wait",
+          x: hoverX / window.innerWidth,
+          y: hoverY / window.innerHeight,
+          teacherDone: Object.keys(teacherState.scannedCodes).length,
+          teacherTotal: [...new Set(parsed.map((course) => course.code))].length,
+          courseCount: courses.length,
+        }
+      } catch (_) {
+        teacherState.scannedCodes[nextTeacherCourse.code] = true
+      }
+    }
     return {
       action: "data",
       schedule: { term, startsOn, importedAt: new Date().toISOString(), source: "web", courses },
     }
   }
 
-  const visible = (node) => {
-    const win = node.ownerDocument.defaultView
-    const style = win.getComputedStyle(node)
-    const rect = node.getBoundingClientRect()
-    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
-  }
-  const nodes = [].concat(...documents.map((doc) => [...doc.querySelectorAll("a,button,input,[role=button],[onclick],li,span,div,p")])).filter(visible)
+  const nodes = [].concat(...documents.map((doc) => [...doc.querySelectorAll("a,button,input,[role=button],[onclick],[ng-click],[data-url],[data-href],li,span,div,p")])).filter(elementVisible)
   const target = (node) => {
-    let current = node
-    for (let depth = 0; current && depth < 12; depth += 1, current = current.parentElement) {
-      const style = current.ownerDocument.defaultView.getComputedStyle(current)
-      if (current.matches("a,button,input,[role=button],[onclick],li,.btn,.menu-item,.dropdown-toggle") || style.cursor === "pointer") return current
-    }
-    return node
+    const chain = []
+    for (let current = node, depth = 0; current && depth < 14; depth += 1, current = current.parentElement) chain.push(current)
+    return chain.find((current) => current.matches && current.matches("a[href],button,input,[role=button],[onclick],[ng-click],[data-url],[data-href]"))
+      || chain.find((current) => current.matches && current.matches(".service-item,.app-item,.portal-item,.card,.btn,.menu-item,.dropdown-toggle"))
+      || chain.find((current) => {
+        try { return current.ownerDocument.defaultView.getComputedStyle(current).cursor === "pointer" } catch (_) { return false }
+      })
+      || chain.find((current) => current.matches && current.matches("li,a,button"))
+      || node
   }
   const point = (action, node) => {
     const clickable = target(node)
+    try { clickable.scrollIntoView({ block: "center", inline: "center", behavior: "auto" }) } catch (_) {}
     const rect = clickable.getBoundingClientRect()
     let x = rect.left + rect.width / 2
     let y = rect.top + rect.height / 2
@@ -185,7 +287,42 @@
       y += frameRect.top
       win = win.parent
     }
-    return { action, x: x / window.innerWidth, y: y / window.innerHeight, href: clickable.href || "", courseCount: courses.length, hasStartDate: Boolean(startsOn) }
+    const rawHref = clickable.href || (clickable.getAttribute && (clickable.getAttribute("data-href") || clickable.getAttribute("data-url"))) || ""
+    let href = ""
+    try {
+      const resolved = new URL(rawHref, clickable.ownerDocument.location.href).href
+      if (rawHref && !/^(?:#|javascript:)/i.test(rawHref) && /^https?:/i.test(resolved)) href = resolved
+    } catch (_) {}
+    let domClicked = false
+    const signature = `${action}:${compact(nodeText(clickable)).slice(0, 40)}`
+    const clickState = window.__tianyangScheduleNavigation || (window.__tianyangScheduleNavigation = {})
+    const now = Date.now()
+    if (clickState.signature !== signature) {
+      clickState.signature = signature
+      clickState.count = 0
+      clickState.time = 0
+    }
+    if (!href && now - Number(clickState.time || 0) > 1100 && Number(clickState.count || 0) < 2) {
+      try {
+        const view = clickable.ownerDocument.defaultView
+        const init = { bubbles: true, cancelable: true, view, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
+        if (view.PointerEvent) {
+          clickable.dispatchEvent(new view.PointerEvent("pointerdown", init))
+          clickable.dispatchEvent(new view.PointerEvent("pointerup", init))
+        }
+        clickable.dispatchEvent(new view.MouseEvent("mousedown", init))
+        clickable.dispatchEvent(new view.MouseEvent("mouseup", init))
+        if (typeof clickable.click === "function") clickable.click()
+        else clickable.dispatchEvent(new view.MouseEvent("click", init))
+        domClicked = true
+        clickState.time = now
+        clickState.count = Number(clickState.count || 0) + 1
+      } catch (_) {}
+    } else if (!href && Number(clickState.count || 0) >= 2) {
+      clickState.count = 0
+      clickState.time = now
+    }
+    return { action, x: x / window.innerWidth, y: y / window.innerHeight, href, domClicked, courseCount: courses.length, hasStartDate: Boolean(startsOn) }
   }
   const text = (node) => compact(nodeText(node))
   const exact = (...labels) => nodes.filter((node) => labels.includes(text(node))).sort((a, b) => text(a).length - text(b).length)[0]

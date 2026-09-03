@@ -41,6 +41,10 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(extractor, /导出至一个PDF文件/)
   assert.match(extractor, /action: "data"/)
   assert.match(extractor, /source: "web"/)
+  assert.match(extractor, /teacher-wait/)
+  assert.match(extractor, /mouseenter/)
+  assert.match(extractor, /scrollIntoView/)
+  assert.match(extractor, /domClicked/)
   assert.match(importer, /EXTRA_SCHEDULE_JSON/)
   assert.match(importer, /isValidExtractedSchedule/)
   assert.match(main, /tianyang:android-schedule-ready/)
@@ -86,12 +90,122 @@ test("teaching-system extractor reads course cards without exporting PDF", async
     documentElement: { innerHTML: "2026-2027学年第一学期 2026-08-31" },
     querySelectorAll: (selector) => selector === "iframe" ? [] : selector.startsWith("td,") ? cards : [],
   }
-  const result = vm.runInNewContext(source, { document, Date, Map, Set })
+  const window = {}
+  const result = vm.runInNewContext(source, { document, window, Date, Map, Set })
   assert.equal(result.action, "data")
   assert.equal(result.schedule.startsOn, "2026-08-31")
   assert.equal(result.schedule.source, "web")
   assert.equal(result.schedule.courses.length, 3)
   assert.deepEqual([...result.schedule.courses[1].weeks], [2, 4, 6, 8, 10, 12, 14, 16])
+})
+
+test("teaching-system extractor collects teacher names from hover details", async () => {
+  const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
+  let tooltipVisible = false
+  class TestEvent {
+    constructor(type) { this.type = type }
+  }
+  const window = {
+    PointerEvent: TestEvent,
+    MouseEvent: TestEvent,
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", cursor: "default" }),
+  }
+  const document = {
+    body: { innerText: "2026-2027学年第一学期\n第1周 2026-08-31—2026-09-06" },
+    documentElement: { innerHTML: "2026-2027学年第一学期 2026-08-31" },
+    defaultView: window,
+    location: { href: "http://jxgl.dlut.edu.cn/student/schedule" },
+    getElementById: () => null,
+  }
+  const makeNode = (innerText) => ({
+    innerText,
+    value: "",
+    textContent: innerText,
+    children: [],
+    parentElement: null,
+    ownerDocument: document,
+    attributes: [],
+    querySelectorAll: () => [],
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 60 }),
+    scrollIntoView: () => {},
+    dispatchEvent: (event) => { if (event.type === "mouseover") tooltipVisible = true },
+    focus: () => {},
+  })
+  const cards = [
+    makeNode("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 2 (1,2)"),
+    makeNode("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 3 (1,2)"),
+    makeNode("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 5 (1,2)"),
+  ]
+  const tooltip = makeNode("任课教师：张三\n课程性质：必修")
+  document.querySelectorAll = (selector) => {
+    if (selector === "iframe") return []
+    if (selector.startsWith("td,")) return cards
+    if (selector.includes("[role=tooltip]")) return tooltipVisible ? [tooltip] : []
+    return []
+  }
+
+  const context = { document, window, Date, Map, Set }
+  const first = vm.runInNewContext(source, context)
+  assert.equal(first.action, "teacher-wait")
+  const second = vm.runInNewContext(source, context)
+  assert.equal(second.action, "data")
+  assert.deepEqual([...second.schedule.courses[0].teachers], ["张三"])
+})
+
+test("teaching-system extractor activates the real schedule card", async () => {
+  const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
+  let clicks = 0
+  class TestEvent {
+    constructor(type) { this.type = type }
+  }
+  const window = {
+    innerWidth: 1000,
+    innerHeight: 1000,
+    parent: null,
+    PointerEvent: TestEvent,
+    MouseEvent: TestEvent,
+    getComputedStyle: (node) => ({ display: "block", visibility: "visible", opacity: "1", cursor: node.isCard ? "pointer" : "default" }),
+  }
+  window.parent = window
+  const document = {
+    body: { innerText: "综合教学管理系统" },
+    documentElement: { innerHTML: "" },
+    defaultView: window,
+    location: { href: "http://jxgl.dlut.edu.cn/student/home" },
+  }
+  const card = {
+    isCard: true,
+    innerText: "我的课表",
+    textContent: "我的课表",
+    value: "",
+    parentElement: null,
+    ownerDocument: document,
+    matches: (selector) => selector.includes(".service-item"),
+    getAttribute: () => "",
+    getBoundingClientRect: () => ({ left: 100, top: 200, width: 200, height: 100 }),
+    scrollIntoView: () => {},
+    dispatchEvent: () => {},
+    click: () => { clicks += 1 },
+  }
+  const label = {
+    innerText: "我的课表",
+    textContent: "我的课表",
+    value: "",
+    parentElement: card,
+    ownerDocument: document,
+    matches: () => false,
+    getBoundingClientRect: () => ({ left: 120, top: 220, width: 100, height: 40 }),
+  }
+  document.querySelectorAll = (selector) => {
+    if (selector === "iframe" || selector.startsWith("td,") || selector.includes("[role=tooltip]")) return []
+    if (selector.startsWith("a,button")) return [label]
+    return []
+  }
+  const result = vm.runInNewContext(source, { document, window, URL, Date, Map, Set })
+  assert.equal(result.action, "schedule")
+  assert.equal(result.domClicked, true)
+  assert.equal(clicks, 1)
 })
 
 test("android webview opens the system PDF picker", async () => {

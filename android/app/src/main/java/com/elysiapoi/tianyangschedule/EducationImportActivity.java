@@ -18,6 +18,7 @@ import android.print.pdf.PrintedPdfDocument;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -326,13 +327,29 @@ public final class EducationImportActivity extends Activity {
                     scheduleAutomationStep(900);
                     return;
                 }
+                if ("teacher-wait".equals(action)) {
+                    int done = target.optInt("teacherDone", 0);
+                    int total = target.optInt("teacherTotal", 0);
+                    float hoverX = (float) target.optDouble("x", -1);
+                    float hoverY = (float) target.optDouble("y", -1);
+                    if (hoverX >= 0 && hoverY >= 0 && hoverX <= 1 && hoverY <= 1) {
+                        hoverWebView(hoverX, hoverY);
+                    }
+                    status.setText("正在读取教师信息 " + Math.min(done + 1, total) + "/" + total + "…");
+                    scheduleAutomationStep(450);
+                    return;
+                }
                 float x = (float) target.optDouble("x", -1);
                 float y = (float) target.optDouble("y", -1);
                 if (x < 0 || y < 0 || x > 1 || y > 1) throw new Exception("按钮位置异常");
                 installPdfCaptureHook();
                 String href = target.optString("href", "");
-                if (!href.isEmpty() && isDlutHttpUri(Uri.parse(href))) webView.loadUrl(href);
-                else tapWebView(x, y);
+                boolean domClicked = target.optBoolean("domClicked", false);
+                if (!href.isEmpty() && isDlutHttpUri(Uri.parse(href))) {
+                    webView.loadUrl(href);
+                } else if (!domClicked) {
+                    tapWebView(x, y);
+                }
                 if ("pdf".equals(action)) {
                     awaitingPdfDownload = true;
                     status.setText("正在请求教务系统导出 PDF…");
@@ -406,6 +423,18 @@ public final class EducationImportActivity extends Activity {
         webView.dispatchTouchEvent(up);
         down.recycle();
         up.recycle();
+    }
+
+    private void hoverWebView(float xRatio, float yRatio) {
+        if (webView == null) return;
+        float x = Math.max(1, Math.min(webView.getWidth() - 1, xRatio * webView.getWidth()));
+        float y = Math.max(1, Math.min(webView.getHeight() - 1, yRatio * webView.getHeight()));
+        long eventTime = SystemClock.uptimeMillis();
+        MotionEvent hover = MotionEvent.obtain(eventTime, eventTime,
+                MotionEvent.ACTION_HOVER_MOVE, x, y, 0);
+        hover.setSource(InputDevice.SOURCE_MOUSE);
+        webView.dispatchGenericMotionEvent(hover);
+        hover.recycle();
     }
 
     private void receiveCapturedPdf(String message) {
