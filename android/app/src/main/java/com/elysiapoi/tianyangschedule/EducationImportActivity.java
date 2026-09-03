@@ -349,8 +349,8 @@ public final class EducationImportActivity extends Activity {
                 .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                 .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
                 .build();
-        try (PrintedPdfDocument document = new PrintedPdfDocument(this, attributes);
-             FileOutputStream output = new FileOutputStream(temporary)) {
+        PrintedPdfDocument document = new PrintedPdfDocument(this, attributes);
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
             Rect pageArea = document.getPageContentRect();
             int viewWidth = Math.max(1, webView.getWidth());
             int contentHeight = Math.max(webView.getHeight(),
@@ -374,6 +374,8 @@ public final class EducationImportActivity extends Activity {
         } catch (Exception error) {
             failNativePdf(error.getMessage());
             return;
+        } finally {
+            document.close();
         }
 
         if (temporary.length() < 5) {
