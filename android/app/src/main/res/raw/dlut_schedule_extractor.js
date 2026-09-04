@@ -74,6 +74,8 @@
   const capturedPayloads = pageWindows.flatMap((pageWindow) => {
     try { return Array.isArray(pageWindow.__tianyangScheduleNetworkPayloads) ? pageWindow.__tianyangScheduleNetworkPayloads : [] } catch (_) { return [] }
   })
+  const payloadText = (payload) => typeof payload === "string" ? payload : clean(payload && payload.text)
+  const payloadUrl = (payload) => typeof payload === "object" && payload ? clean(payload.url) : ""
 
   const teachersFromPayloads = (course) => {
     const result = []
@@ -101,16 +103,49 @@
       for (const item of Object.values(value)) if (item && typeof item === "object") visit(item, depth + 1)
     }
     for (const payload of capturedPayloads) {
-      try { visit(JSON.parse(payload)) } catch (_) {
-        const marker = payload.indexOf(course.code) >= 0 ? course.code : course.name
-        let index = payload.indexOf(marker)
+      const text = payloadText(payload)
+      try { visit(JSON.parse(text)) } catch (_) {
+        const marker = text.indexOf(course.code) >= 0 ? course.code : course.name
+        let index = text.indexOf(marker)
         while (index >= 0) {
-          result.push(...extractTeachers(payload.slice(Math.max(0, index - 1200), index + marker.length + 1200)))
-          index = payload.indexOf(marker, index + marker.length)
+          result.push(...extractTeachers(text.slice(Math.max(0, index - 1200), index + marker.length + 1200)))
+          index = text.indexOf(marker, index + marker.length)
         }
       }
     }
     return [...new Set(result)]
+  }
+
+  const networkDiagnostics = (course) => {
+    const samples = []
+    const safe = (value) => clean(value)
+      .replace(/(password|passwd|pwd|token|cookie|authorization)\s*[:=]\s*[^,;\s]+/gi, "$1=[已隐藏]")
+      .slice(0, 180)
+    const visit = (value, depth = 0) => {
+      if (!value || typeof value !== "object" || depth > 10 || samples.length >= 8) return
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, depth + 1)
+        return
+      }
+      const scalarEntries = Object.entries(value).filter(([, item]) => typeof item === "string" || typeof item === "number")
+      const sameCourse = scalarEntries.some(([, item]) => String(item).includes(course.code)
+        || String(item) === course.name || String(item).includes(course.name))
+      if (sameCourse) {
+        samples.push({
+          keys: Object.keys(value).slice(0, 40),
+          values: scalarEntries.slice(0, 24).map(([key, item]) => `${key}=${safe(item)}`),
+        })
+      }
+      for (const item of Object.values(value)) if (item && typeof item === "object") visit(item, depth + 1)
+    }
+    for (const payload of capturedPayloads) {
+      const text = payloadText(payload)
+      if (!text || (!text.includes(course.code) && !text.includes(course.name))) continue
+      try { visit(JSON.parse(text)) } catch (_) {
+        samples.push({ url: payloadUrl(payload), rawAroundCourse: safe(text.slice(Math.max(0, text.indexOf(course.code) - 250), text.indexOf(course.code) + 900)) })
+      }
+    }
+    return samples.slice(0, 8)
   }
 
   const courseNodes = []
@@ -220,8 +255,14 @@
     scannedCodes: {},
     pendingCode: "",
     observedTexts: [],
+    observedMutations: [],
+    pendingAttempts: 0,
+    pendingBaseline: [],
+    diagnosticsByCode: {},
   })
   if (!Array.isArray(teacherState.observedTexts)) teacherState.observedTexts = []
+  if (!Array.isArray(teacherState.observedMutations)) teacherState.observedMutations = []
+  if (!teacherState.diagnosticsByCode) teacherState.diagnosticsByCode = {}
 
   const tooltipSelectors = [
     "[role=tooltip]", ".tooltip", ".tooltip-inner", ".popover", ".popover-content",
@@ -236,17 +277,76 @@
       return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0
     } catch (_) { return false }
   }
-  for (const doc of documents) {
+  const rootList = []
+  const collectRoots = (root) => {
+    if (!root || rootList.includes(root)) return
+    rootList.push(root)
     try {
+      for (const node of [...root.querySelectorAll("*")].slice(0, 3000)) {
+        if (node.shadowRoot) collectRoots(node.shadowRoot)
+      }
+    } catch (_) {}
+  }
+  for (const doc of documents) collectRoots(doc)
+
+  const describeNode = (node) => {
+    try {
+      const style = node.ownerDocument.defaultView.getComputedStyle(node)
+      const rect = node.getBoundingClientRect()
+      return {
+        tag: String(node.tagName || "node").toLowerCase(),
+        id: clean(node.id).slice(0, 80),
+        class: clean(typeof node.className === "string" ? node.className : "").slice(0, 160),
+        role: clean(node.getAttribute && node.getAttribute("role")).slice(0, 50),
+        position: clean(style.position),
+        zIndex: clean(style.zIndex),
+        box: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
+        text: nodeText(node).replace(/(password|passwd|pwd|token|cookie|authorization)\s*[:=]\s*[^\n,;]+/gi, "$1=[已隐藏]").slice(0, 700),
+      }
+    } catch (_) { return null }
+  }
+
+  const visibleDiagnostics = () => {
+    const result = []
+    const seen = new Set()
+    for (const root of rootList) {
+      let nodes = []
+      try { nodes = [...root.querySelectorAll("*")].slice(0, 3000) } catch (_) {}
+      for (const node of nodes) {
+        const text = nodeText(node)
+        if (!text || text.length < 2 || text.length > 1800 || !elementVisible(node)) continue
+        let interesting = /任课教师|授课教师|主讲教师|教师姓名|老师/.test(text)
+        try {
+          const style = node.ownerDocument.defaultView.getComputedStyle(node)
+          interesting ||= style.position === "fixed" || style.position === "absolute" || (style.zIndex !== "auto" && Number(style.zIndex) > 1)
+        } catch (_) {}
+        if (!interesting || seen.has(text)) continue
+        const description = describeNode(node)
+        if (description) result.push(description)
+        seen.add(text)
+        if (result.length >= 50) return result
+      }
+    }
+    return result
+  }
+
+  for (const root of rootList) {
+    try {
+      const doc = root.nodeType === 9 ? root : root.ownerDocument
       const view = doc.defaultView
-      if (!doc.__tianyangTeacherObserver && view.MutationObserver && doc.documentElement) {
-        doc.__tianyangTeacherObserver = new view.MutationObserver((mutations) => {
+      const observerTarget = root.nodeType === 9 ? root.documentElement : root
+      if (!root.__tianyangTeacherObserver && view.MutationObserver && observerTarget) {
+        root.__tianyangTeacherObserver = new view.MutationObserver((mutations) => {
           for (const mutation of mutations) {
             const candidates = [mutation.target, ...mutation.addedNodes]
             for (const node of candidates) {
               const value = clean(node && (node.innerText || node.textContent || ""))
               if (value && value.length < 1800 && /任课教师|授课教师|主讲教师|教师姓名|老师/.test(value)) {
                 teacherState.observedTexts.push(value)
+              }
+              const description = node && node.nodeType === 1 ? describeNode(node) : null
+              if (description && (description.text || mutation.attributeName)) {
+                teacherState.observedMutations.push({ type: mutation.type, attribute: mutation.attributeName || "", node: description })
               }
               if (node && node.attributes) {
                 for (const attribute of node.attributes) {
@@ -258,12 +358,13 @@
             }
           }
           if (teacherState.observedTexts.length > 30) teacherState.observedTexts.splice(0, teacherState.observedTexts.length - 30)
+          if (teacherState.observedMutations.length > 40) teacherState.observedMutations.splice(0, teacherState.observedMutations.length - 40)
         })
-        doc.__tianyangTeacherObserver.observe(doc.documentElement, {
+        root.__tianyangTeacherObserver.observe(observerTarget, {
           childList: true,
           subtree: true,
           attributes: true,
-          attributeFilter: ["title", "data-title", "data-content", "data-original-title", "aria-label", "aria-describedby"],
+          attributeFilter: ["class", "style", "aria-hidden", "title", "data-title", "data-content", "data-original-title", "aria-label", "aria-describedby"],
         })
       }
     } catch (_) {}
@@ -276,10 +377,33 @@
     const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
     const pendingMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
     const observedText = teacherState.observedTexts.splice(0).join("\n")
-    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}\n${observedText}`)
+    const visibleNow = visibleDiagnostics()
+    const baseline = new Set(teacherState.pendingBaseline || [])
+    const newlyVisible = visibleNow.filter((item) => !baseline.has(item.text))
+    const mutationSnapshot = teacherState.observedMutations.splice(0)
+    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}\n${observedText}\n${newlyVisible.map((item) => item.text).join("\n")}`)
+    const attempt = {
+      attempt: Number(teacherState.pendingAttempts || 0) + 1,
+      found,
+      metadata: pendingMetadata.slice(0, 1000),
+      knownTooltipText: tooltipText.slice(0, 1800),
+      observedText: observedText.slice(0, 1800),
+      newlyVisible: newlyVisible.slice(0, 16),
+      mutations: mutationSnapshot.slice(0, 16),
+    }
+    const currentDiagnostics = teacherState.diagnosticsByCode[teacherState.pendingCode] || { attempts: [] }
+    currentDiagnostics.attempts.push(attempt)
+    currentDiagnostics.network = pendingEntry ? networkDiagnostics(pendingEntry) : []
+    teacherState.diagnosticsByCode[teacherState.pendingCode] = currentDiagnostics
     if (found.length) teacherState.teachersByCode[teacherState.pendingCode] = found
-    teacherState.scannedCodes[teacherState.pendingCode] = true
-    teacherState.pendingCode = ""
+    if (found.length || Number(teacherState.pendingAttempts || 0) >= 2) {
+      teacherState.scannedCodes[teacherState.pendingCode] = true
+      teacherState.pendingCode = ""
+      teacherState.pendingAttempts = 0
+      teacherState.pendingBaseline = []
+    } else {
+      teacherState.pendingAttempts = Number(teacherState.pendingAttempts || 0) + 1
+    }
   }
 
   for (const course of parsed) {
@@ -300,7 +424,7 @@
   })).sort((a, b) => a.day - b.day || a.startSection - b.startSection || a.name.localeCompare(b.name, "zh-CN"))
 
   if (courses.length >= 3 && /^20\d{2}-\d{2}-\d{2}$/.test(startsOn)) {
-    const nextTeacherCourse = parsed.find((course) => !course.teachers.length
+    const nextTeacherCourse = parsed.find((course) => course.code === teacherState.pendingCode) || parsed.find((course) => !course.teachers.length
       && !(teacherState.teachersByCode[course.code] || []).length
       && !teacherState.scannedCodes[course.code])
     if (nextTeacherCourse) {
@@ -316,6 +440,12 @@
       }) || courseNode
       try {
         teacherState.observedTexts.splice(0)
+        teacherState.observedMutations.splice(0)
+        if (teacherState.pendingCode !== nextTeacherCourse.code) {
+          teacherState.pendingCode = nextTeacherCourse.code
+          teacherState.pendingAttempts = 0
+          teacherState.pendingBaseline = visibleDiagnostics().map((item) => item.text)
+        }
         node.scrollIntoView({ block: "center", inline: "center", behavior: "auto" })
         const view = node.ownerDocument.defaultView
         const rect = node.getBoundingClientRect()
@@ -328,7 +458,6 @@
         node.dispatchEvent(new view.MouseEvent("mouseover", init))
         node.dispatchEvent(new view.MouseEvent("mousemove", init))
         if (typeof node.focus === "function") node.focus({ preventScroll: true })
-        teacherState.pendingCode = nextTeacherCourse.code
         let hoverX = rect.left + rect.width / 2
         let hoverY = rect.top + rect.height / 2
         let hoverWindow = node.ownerDocument.defaultView
@@ -345,6 +474,7 @@
           teacherDone: Object.keys(teacherState.scannedCodes).length,
           teacherTotal: [...new Set(parsed.map((course) => course.code))].length,
           courseCount: courses.length,
+          delayMs: 1200 + Number(teacherState.pendingAttempts || 0) * 600,
         }
       } catch (_) {
         teacherState.scannedCodes[nextTeacherCourse.code] = true
@@ -353,6 +483,15 @@
     return {
       action: "data",
       schedule: { term, startsOn, importedAt: new Date().toISOString(), source: "web", courses },
+      diagnostics: [...new Set(parsed.map((course) => course.code))].map((code) => {
+        const course = parsed.find((entry) => entry.code === code)
+        return {
+          code,
+          name: course ? course.name : "",
+          teachers: teacherState.teachersByCode[code] || [],
+          detail: teacherState.diagnosticsByCode[code] || { attempts: [], network: course ? networkDiagnostics(course) : [] },
+        }
+      }),
     }
   }
   return { action: "none", courseCount: courses.length, hasStartDate: Boolean(startsOn) }
