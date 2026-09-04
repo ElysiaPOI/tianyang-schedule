@@ -67,8 +67,24 @@
     for (const match of source.matchAll(/(?:teacherNames?|teacherName|instructorNames?|instructor|jsmc|jsxm|rkjs|skjs)["']?\s*[:=]\s*["']([^"'\]\[}{]{2,80})/gi)) {
       result.push(...match[1].split(/[、，,;；/\s]+/))
     }
+    // The DLUT popover does not label teachers. Its repeated block is:
+    // class names -> teacher name -> campus/room/weeks. Treat only a standalone
+    // Chinese name immediately followed by a location line as a teacher.
+    const lines = String(value || "").replace(/\u00a0/g, " ").split(/\n+/).map(clean).filter(Boolean)
+    const locationLine = /(?:校区|教学|综合|建筑|主楼|创新|开发区|材料馆|化工楼|体育馆|排球馆|体育场|教室|机房|实验室|[A-Za-z]\d{2,4}|综\d{2,4}|建\d{2,4}).*(?:周|楼|馆|场|室|\d)/
+    const classLine = /^[\u3400-\u9fff]{1,8}\d{4}(?:[\/／]\d{2,4})*(?:班)?$/
+    const structuredTeachers = []
+    for (let index = 0; index + 1 < lines.length; index += 1) {
+      const candidate = lines[index].replace(/^[·•*\-—]+\s*/, "")
+      const previous = lines[index - 1] || ""
+      const insideAssignmentBlock = classLine.test(previous) || (structuredTeachers.length > 0 && locationLine.test(previous))
+      if (insideAssignmentBlock && /^[\u3400-\u9fff·]{2,8}$/.test(candidate) && locationLine.test(lines[index + 1])) {
+        structuredTeachers.push(candidate)
+        result.push(candidate)
+      }
+    }
     return [...new Set(result.map((name) => clean(name).replace(/[（(].*?[）)]/g, "").replace(/老师$/g, ""))
-      .filter((name) => /^[\u3400-\u9fff·]{2,8}$/.test(name) && !/^(任课|授课|主讲|教师|老师|姓名|上课|默认组|课程性质|开课单位)$/.test(name)))]
+      .filter((name) => /^[\u3400-\u9fff·]{2,8}$/.test(name) && !/^(任课|授课|主讲|教师|老师|姓名|上课|默认组|课程性质|开课单位|凌水主校区|开发区校区)$/.test(name)))]
   }
 
   const capturedPayloads = pageWindows.flatMap((pageWindow) => {

@@ -103,7 +103,7 @@ test("teaching-system extractor reads course cards without exporting PDF", async
   assert.deepEqual([...result.schedule.courses[1].weeks], [2, 4, 6, 8, 10, 12, 14, 16])
 })
 
-test("teaching-system extractor collects teacher names from hover details", async () => {
+test("teaching-system extractor collects unlabeled teacher names from the real hover layout", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   let tooltipVisible = false
   class TestEvent {
@@ -141,7 +141,7 @@ test("teaching-system extractor collects teacher names from hover details", asyn
     makeNode("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 3 (1,2)"),
     makeNode("1000000000001.01\n测试课程甲\n教学楼 A101 (1~10周) 5 (1,2)"),
   ]
-  const tooltip = makeNode("任课教师：张三\n课程性质：必修")
+  const tooltip = makeNode("1000000000001.01测试课程甲\n计2401/02/03/04/05/06\n姚卫红\n凌水主校区 综合教学1号楼 综158(1~5周)\n马野\n凌水主校区 综合教学1号楼 综158(6~10周)\n组号: 默认组")
   document.querySelectorAll = (selector) => {
     if (selector === "iframe") return []
     if (selector.startsWith("td,")) return cards
@@ -154,7 +154,7 @@ test("teaching-system extractor collects teacher names from hover details", asyn
   assert.equal(first.action, "teacher-wait")
   const second = vm.runInNewContext(source, context)
   assert.equal(second.action, "data")
-  assert.deepEqual([...second.schedule.courses[0].teachers], ["张三"])
+  assert.deepEqual([...second.schedule.courses[0].teachers], ["姚卫红", "马野"])
 })
 
 test("teaching-system extractor reads teachers captured from schedule responses", async () => {
