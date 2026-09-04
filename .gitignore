@@ -45,3 +45,5 @@ android/local.properties
 android/**/build/
 *.apk
 *.aab
+*.jks
+*.keystore

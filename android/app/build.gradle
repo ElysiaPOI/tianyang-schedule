@@ -2,6 +2,17 @@ plugins {
     id "com.android.application"
 }
 
+def releaseKeystorePath = System.getenv("TIANYANG_KEYSTORE_PATH")?.trim()
+def releaseKeystorePassword = System.getenv("TIANYANG_KEYSTORE_PASSWORD")?.trim()
+def releaseKeyAlias = System.getenv("TIANYANG_KEY_ALIAS")?.trim()
+def releaseKeyPassword = System.getenv("TIANYANG_KEY_PASSWORD")?.trim()
+def releaseSigningConfigured = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { it }
+
 android {
     namespace "com.elysiapoi.tianyangschedule"
     compileSdk 36
@@ -18,10 +29,24 @@ android {
         main.assets.srcDirs = ["../../dist/client"]
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
@@ -33,4 +58,17 @@ android {
 
 dependencies {
     implementation "androidx.webkit:webkit:1.17.0"
+}
+
+tasks.configureEach { task ->
+    if (task.name == "preReleaseBuild") {
+        task.doFirst {
+            if (!releaseSigningConfigured) {
+                throw new GradleException(
+                    "Release signing is not configured. Set TIANYANG_KEYSTORE_PATH, " +
+                    "TIANYANG_KEYSTORE_PASSWORD, TIANYANG_KEY_ALIAS and TIANYANG_KEY_PASSWORD."
+                )
+            }
+        }
+    }
 }

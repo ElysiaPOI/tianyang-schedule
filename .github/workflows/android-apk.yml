@@ -1,7 +1,17 @@
-name: Build Android APK
+name: Verify and publish Android APK
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "同时创建 GitHub Release"
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: "发布标签，例如 v1.2.6（仅发布 Release 时填写）"
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -12,8 +22,31 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22.13.0"
+          cache: npm
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Build offline web app
+        run: npm run build:android-web
+
+      - name: Run tests
+        run: npm test
+
+  release:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -38,12 +71,72 @@ jobs:
           gradle-version: "9.5.0"
           cache-provider: basic
 
-      - name: Build debug APK
-        run: gradle -p android :app:assembleDebug
+      - name: Decode release signing key
+        env:
+          ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$ANDROID_SIGNING_KEY" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" || -z "$ANDROID_KEY_PASSWORD" ]]; then
+            echo "Android release signing secrets are incomplete." >&2
+            exit 1
+          fi
+          printf '%s' "$ANDROID_SIGNING_KEY" | base64 --decode > "$RUNNER_TEMP/tianyang-schedule-release.jks"
+
+      - name: Build signed release APK
+        env:
+          TIANYANG_KEYSTORE_PATH: ${{ runner.temp }}/tianyang-schedule-release.jks
+          TIANYANG_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TIANYANG_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          TIANYANG_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle -p android :app:assembleRelease
+
+      - name: Verify signature and prepare files
+        run: |
+          VERSION_NAME=$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' android/app/build.gradle)
+          if [[ -z "$VERSION_NAME" ]]; then
+            echo "Unable to read Android versionName." >&2
+            exit 1
+          fi
+          mkdir -p release
+          cp android/app/build/outputs/apk/release/app-release.apk "release/天扬课表-v${VERSION_NAME}.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs "release/天扬课表-v${VERSION_NAME}.apk"
+          sha256sum "release/天扬课表-v${VERSION_NAME}.apk" > "release/天扬课表-v${VERSION_NAME}.apk.sha256"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: tianyang-schedule-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: tianyang-schedule-release
+          path: release/*
           if-no-files-found: error
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          VERSION_NAME=$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' android/app/build.gradle)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          else
+            RELEASE_TAG="$REQUESTED_TAG"
+          fi
+          if [[ "$RELEASE_TAG" != "v${VERSION_NAME}" ]]; then
+            echo "Release tag must be v${VERSION_NAME}; received: ${RELEASE_TAG:-<empty>}." >&2
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          else
+            RELEASE_TAG="$REQUESTED_TAG"
+          fi
+          gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "天扬课表 ${RELEASE_TAG}" --generate-notes
