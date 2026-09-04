@@ -385,9 +385,39 @@
       }
     } catch (_) {}
   }
-  const tooltipEntries = documents.flatMap((doc) => {
-    try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible).map(nodeText) } catch (_) { return [] }
+  const tooltipNodes = documents.flatMap((doc) => {
+    try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible) } catch (_) { return [] }
   })
+  // Popovers are positioned over the next weekday column on the narrow WebView.
+  // Keep them readable, but never let them intercept the native hover used for
+  // the following course.
+  for (const node of tooltipNodes) {
+    try { node.style.pointerEvents = "none" } catch (_) {}
+  }
+  const tooltipEntries = tooltipNodes.map(nodeText)
+
+  const dismissTooltips = (courseNode) => {
+    if (courseNode && courseNode.ownerDocument) {
+      try {
+        const view = courseNode.ownerDocument.defaultView
+        const rect = courseNode.getBoundingClientRect()
+        const init = { bubbles: true, cancelable: true, view, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
+        if (view.PointerEvent) {
+          courseNode.dispatchEvent(new view.PointerEvent("pointerout", init))
+          courseNode.dispatchEvent(new view.PointerEvent("pointerleave", { ...init, bubbles: false }))
+        }
+        courseNode.dispatchEvent(new view.MouseEvent("mouseout", init))
+        courseNode.dispatchEvent(new view.MouseEvent("mouseleave", { ...init, bubbles: false }))
+        const jquery = view.jQuery || view.$
+        if (jquery && jquery.fn && jquery.fn.popover) jquery(courseNode).popover("hide")
+      } catch (_) {}
+    }
+    for (const node of tooltipNodes) {
+      try { node.remove() } catch (_) {
+        try { if (node.parentNode) node.parentNode.removeChild(node) } catch (_) {}
+      }
+    }
+  }
 
   if (teacherState.pendingCode) {
     const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
@@ -416,6 +446,7 @@
     currentDiagnostics.network = pendingEntry ? networkDiagnostics(pendingEntry) : []
     teacherState.diagnosticsByCode[teacherState.pendingCode] = currentDiagnostics
     if (found.length) teacherState.teachersByCode[teacherState.pendingCode] = found
+    dismissTooltips(pendingEntry && pendingEntry.node)
     if (found.length || Number(teacherState.pendingAttempts || 0) >= 2) {
       teacherState.scannedCodes[teacherState.pendingCode] = true
       teacherState.pendingCode = ""

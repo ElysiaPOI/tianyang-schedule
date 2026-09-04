@@ -160,6 +160,7 @@ test("teaching-system extractor collects unlabeled teacher names from the real h
 test("teaching-system extractor does not leak teachers from stale popovers into other courses", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   const visibleTooltips = []
+  let maxVisibleTooltips = 0
   class TestEvent { constructor(type) { this.type = type } }
   const window = {
     innerWidth: 1000,
@@ -182,25 +183,35 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
     "1000000000002.01": "1000000000002.01课程乙\n计2401/02\n李四\n凌水主校区 综合教学1号楼 A102(1~10周)\n组号: 默认组",
     "1000000000003.01": "1000000000003.01课程丙\n计2401/02\n王五\n凌水主校区 综合教学1号楼 A103(1~10周)\n组号: 默认组",
   }
-  const makeNode = (innerText, code = "") => ({
-    innerText,
-    value: "",
-    textContent: innerText,
-    children: [],
-    parentElement: null,
-    ownerDocument: document,
-    attributes: [],
-    querySelectorAll: () => [],
-    getAttribute: () => null,
-    getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 60 }),
-    scrollIntoView: () => {},
-    dispatchEvent: (event) => {
-      if (code && event.type === "mouseover" && !visibleTooltips.some((item) => item.innerText.startsWith(code))) {
-        visibleTooltips.push(makeNode(tooltipTexts[code]))
-      }
-    },
-    focus: () => {},
-  })
+  const makeNode = (innerText, code = "") => {
+    const node = {
+      innerText,
+      value: "",
+      textContent: innerText,
+      children: [],
+      parentElement: null,
+      parentNode: null,
+      ownerDocument: document,
+      attributes: [],
+      style: {},
+      querySelectorAll: () => [],
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 60 }),
+      scrollIntoView: () => {},
+      dispatchEvent: (event) => {
+        if (code && event.type === "mouseover" && !visibleTooltips.some((item) => item.innerText.startsWith(code))) {
+          visibleTooltips.push(makeNode(tooltipTexts[code]))
+          maxVisibleTooltips = Math.max(maxVisibleTooltips, visibleTooltips.length)
+        }
+      },
+      remove: () => {
+        const index = visibleTooltips.indexOf(node)
+        if (index >= 0) visibleTooltips.splice(index, 1)
+      },
+      focus: () => {},
+    }
+    return node
+  }
   const cards = Object.keys(tooltipTexts).map((code, index) => makeNode(`${code}\n课程${"甲乙丙"[index]}\n教学楼 A10${index + 1} (1~10周) ${index + 1} (1,2)`, code))
   document.querySelectorAll = (selector) => {
     if (selector === "iframe") return []
@@ -219,6 +230,8 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
   assert.deepEqual([...result.schedule.courses[0].teachers], ["张三"])
   assert.deepEqual([...result.schedule.courses[1].teachers], ["李四"])
   assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
+  assert.equal(maxVisibleTooltips, 1)
+  assert.equal(visibleTooltips.length, 0)
 })
 
 test("teaching-system extractor reads teachers captured from schedule responses", async () => {
