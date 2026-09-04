@@ -60,6 +60,8 @@ public final class EducationImportActivity extends Activity {
     private boolean reading;
     private int readAttempts;
     private int failedCriticalAssetCount;
+    private float lastHoverX = -1;
+    private float lastHoverY = -1;
     private String firstFailedAssetHost;
     private String scheduleExtractorScript;
     private String networkCaptureScript;
@@ -280,6 +282,8 @@ public final class EducationImportActivity extends Activity {
         diagnosticButton.setVisibility(Button.GONE);
         readButton.setText("读取当前课表");
         readAttempts = 0;
+        lastHoverX = -1;
+        lastHoverY = -1;
         progress.setVisibility(ProgressBar.VISIBLE);
         status.setText("正在读取当前网页中的课程…");
         installNetworkCaptureHook();
@@ -374,7 +378,7 @@ public final class EducationImportActivity extends Activity {
     private String buildDiagnosticReport(JSONObject response, JSONObject schedule, int missingTeachers) {
         try {
             JSONObject report = new JSONObject();
-            report.put("diagnosticVersion", "teacher-tooltip-1");
+            report.put("diagnosticVersion", "teacher-multisource-2");
             report.put("android", Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + ")");
             report.put("userAgent", webView.getSettings().getUserAgentString());
             Uri current = Uri.parse(webView.getUrl() == null ? "" : webView.getUrl());
@@ -385,7 +389,7 @@ public final class EducationImportActivity extends Activity {
                     ? new JSONArray() : response.optJSONArray("diagnostics"));
             return report.toString(2);
         } catch (Exception error) {
-            return "{\"diagnosticVersion\":\"teacher-tooltip-1\",\"error\":\"report-build-failed\"}";
+            return "{\"diagnosticVersion\":\"teacher-multisource-2\",\"error\":\"report-build-failed\"}";
         }
     }
 
@@ -420,8 +424,17 @@ public final class EducationImportActivity extends Activity {
         float x = Math.max(1, Math.min(webView.getWidth() - 1, xRatio * webView.getWidth()));
         float y = Math.max(1, Math.min(webView.getHeight() - 1, yRatio * webView.getHeight()));
         long eventTime = android.os.SystemClock.uptimeMillis();
-        MotionEvent hover = MotionEvent.obtain(eventTime, eventTime,
-                MotionEvent.ACTION_HOVER_MOVE, x, y, 0);
+        if (lastHoverX >= 0 && lastHoverY >= 0) {
+            dispatchHoverEvent(MotionEvent.ACTION_HOVER_EXIT, lastHoverX, lastHoverY, eventTime);
+        }
+        dispatchHoverEvent(MotionEvent.ACTION_HOVER_ENTER, x, y, eventTime);
+        dispatchHoverEvent(MotionEvent.ACTION_HOVER_MOVE, x, y, eventTime);
+        lastHoverX = x;
+        lastHoverY = y;
+    }
+
+    private void dispatchHoverEvent(int action, float x, float y, long eventTime) {
+        MotionEvent hover = MotionEvent.obtain(eventTime, eventTime, action, x, y, 0);
         hover.setSource(InputDevice.SOURCE_MOUSE);
         webView.dispatchGenericMotionEvent(hover);
         hover.recycle();

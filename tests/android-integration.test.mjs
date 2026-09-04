@@ -37,7 +37,7 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(importer, /读取当前课表/)
   assert.match(importer, /readCurrentSchedule/)
   assert.match(importer, /复制诊断/)
-  assert.match(importer, /teacher-tooltip-1/)
+  assert.match(importer, /teacher-multisource-2/)
   assert.match(importer, /ClipboardManager/)
   assert.match(extractor, /action: "data"/)
   assert.match(extractor, /source: "web"/)
@@ -47,6 +47,10 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(extractor, /MutationObserver/)
   assert.match(extractor, /__tianyangScheduleNetworkPayloads/)
   assert.match(extractor, /pendingAttempts/)
+  assert.match(extractor, /candidateIndexByCode/)
+  assert.match(extractor, /bootstrapPopoverText/)
+  assert.match(extractor, /shown\.bs\.popover/)
+  assert.match(extractor, /scopedCourseText/)
   assert.match(extractor, /newlyVisible/)
   assert.match(extractor, /attributeFilter: \["class", "style", "aria-hidden"/)
   assert.match(extractor, /diagnostics:/)
@@ -56,6 +60,8 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(importer, /WebViewCompat\.addDocumentStartJavaScript/)
   assert.match(importer, /WebViewFeature\.DOCUMENT_START_SCRIPT/)
   assert.match(importer, /MotionEvent\.ACTION_HOVER_MOVE/)
+  assert.match(importer, /MotionEvent\.ACTION_HOVER_EXIT/)
+  assert.match(importer, /MotionEvent\.ACTION_HOVER_ENTER/)
   assert.match(importer, /removeAllCookies/)
   assert.doesNotMatch(importer, /PrintedPdfDocument|capturePicture|DownloadListener|scheduleAutomationStep/)
   assert.doesNotMatch(extractor, /打印大课表|导出至一个PDF文件|domClicked|action: "schedule"|action: "pdf"/)
@@ -95,7 +101,12 @@ test("teaching-system extractor reads course cards without exporting PDF", async
     querySelectorAll: (selector) => selector === "iframe" ? [] : selector.startsWith("td,") ? cards : [],
   }
   const window = {}
-  const result = vm.runInNewContext(source, { document, window, Date, Map, Set })
+  const context = { document, window, Date, Map, Set }
+  let result
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    result = vm.runInNewContext(source, context)
+    if (result.action === "data") break
+  }
   assert.equal(result.action, "data")
   assert.equal(result.schedule.startsOn, "2026-08-31")
   assert.equal(result.schedule.source, "web")
@@ -161,6 +172,7 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   const visibleTooltips = []
   let maxVisibleTooltips = 0
+  let forcedRemoveCalls = 0
   class TestEvent { constructor(type) { this.type = type } }
   const window = {
     innerWidth: 1000,
@@ -203,10 +215,13 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
           visibleTooltips.push(makeNode(tooltipTexts[code]))
           maxVisibleTooltips = Math.max(maxVisibleTooltips, visibleTooltips.length)
         }
+        if (code && event.type === "mouseleave") {
+          const index = visibleTooltips.findIndex((item) => item.innerText.startsWith(code))
+          if (index >= 0) visibleTooltips.splice(index, 1)
+        }
       },
       remove: () => {
-        const index = visibleTooltips.indexOf(node)
-        if (index >= 0) visibleTooltips.splice(index, 1)
+        forcedRemoveCalls += 1
       },
       focus: () => {},
     }
@@ -232,6 +247,83 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
   assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
   assert.equal(maxVisibleTooltips, 1)
   assert.equal(visibleTooltips.length, 0)
+  assert.equal(forcedRemoveCalls, 0)
+})
+
+test("teaching-system extractor tries another card and reads teacher metadata outside the popup", async () => {
+  const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
+  class TestEvent { constructor(type) { this.type = type } }
+  const window = {
+    innerWidth: 1000,
+    innerHeight: 1000,
+    parent: null,
+    PointerEvent: TestEvent,
+    MouseEvent: TestEvent,
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", cursor: "default", position: "static", zIndex: "auto" }),
+    __tianyangScheduleNetworkPayloads: [JSON.stringify([
+      { courseCode: "1000000000002.01", courseName: "课程乙", teacherName: "李四" },
+      { courseCode: "1000000000003.01", courseName: "课程丙", teacherName: "王五" },
+    ])],
+  }
+  window.parent = window
+  const document = {
+    body: { innerText: "2026-2027学年第一学期\n第1周 2026-08-31—2026-09-06" },
+    documentElement: { innerHTML: "2026-2027学年第一学期 2026-08-31" },
+    defaultView: window,
+    location: { href: "http://jxgl.dlut.edu.cn/student/schedule" },
+    getElementById: () => null,
+  }
+  const hoverCounts = [0, 0]
+  const makeCard = (innerText, onHover = () => {}) => {
+    let detail = ""
+    const node = {
+      innerText,
+      value: "",
+      textContent: innerText,
+      children: [],
+      parentElement: null,
+      ownerDocument: document,
+      style: {},
+      querySelectorAll: () => [],
+      get attributes() { return detail ? [{ name: "data-original-title", value: detail }] : [] },
+      getAttribute: (name) => name === "data-original-title" ? detail : null,
+      getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 60 }),
+      scrollIntoView: () => {},
+      dispatchEvent: (event) => {
+        if (event.type === "mouseover") detail = onHover() || detail
+      },
+      focus: () => {},
+    }
+    return node
+  }
+  const cards = [
+    makeCard("1000000000001.01\n课程甲\n教学楼 A101 (1~10周) 2 (1,2)", () => { hoverCounts[0] += 1; return "" }),
+    makeCard("1000000000001.01\n课程甲\n教学楼 A101 (1~10周) 4 (1,2)", () => {
+      hoverCounts[1] += 1
+      return "1000000000001.01课程甲\n计2401/02\n张三\n凌水主校区 综合教学1号楼 A101(1~10周)\n组号: 默认组"
+    }),
+    makeCard("1000000000002.01\n课程乙\n教学楼 A102 (1~10周) 3 (3,4)"),
+    makeCard("1000000000003.01\n课程丙\n教学楼 A103 (1~10周) 5 (5,6)"),
+  ]
+  document.querySelectorAll = (selector) => {
+    if (selector === "iframe") return []
+    if (selector.startsWith("td,")) return cards
+    return []
+  }
+
+  const context = { document, window, Date, Map, Set }
+  let result
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    result = vm.runInNewContext(source, context)
+    if (result.action === "data") break
+  }
+  assert.equal(result.action, "data")
+  const courseA = result.schedule.courses.filter((course) => course.code === "1000000000001.01")
+  assert.equal(courseA.length, 2)
+  assert.deepEqual([...courseA[0].teachers], ["张三"])
+  assert.deepEqual([...courseA[1].teachers], ["张三"])
+  assert.equal(hoverCounts[0], 2)
+  assert.equal(hoverCounts[1], 1)
 })
 
 test("teaching-system extractor reads teachers captured from schedule responses", async () => {

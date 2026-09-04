@@ -58,6 +58,57 @@
     return clean(values.join("\n"))
   }
 
+  const scopedCourseText = (value, code) => {
+    const source = String(value || "")
+    if (!source || !code || !source.includes(code)) return ""
+    const segments = []
+    let start = source.indexOf(code)
+    while (start >= 0 && segments.length < 8) {
+      let end = Math.min(source.length, start + 2600)
+      const rest = source.slice(start + code.length)
+      for (const match of rest.matchAll(new RegExp(coursePattern.source, "g"))) {
+        if (match[0] !== code) {
+          end = Math.min(end, start + code.length + (match.index || 0))
+          break
+        }
+      }
+      segments.push(source.slice(start, end))
+      start = source.indexOf(code, start + code.length)
+    }
+    return clean(segments.join("\n"))
+  }
+
+  const bootstrapPopoverText = (node) => {
+    if (!node || !node.ownerDocument) return ""
+    const values = []
+    try {
+      const view = node.ownerDocument.defaultView
+      const jquery = view.jQuery || view.$
+      if (!jquery) return ""
+      const wrapped = jquery(node)
+      const instance = wrapped.data("bs.popover") || wrapped.data("popover")
+        || wrapped.data("bs.tooltip") || wrapped.data("tooltip")
+      if (!instance) return ""
+      const add = (value) => {
+        if (typeof value === "function") {
+          try { value = value.call(node) } catch (_) { return }
+        }
+        if (value && value.jquery && value[0]) values.push(nodeText(value[0]))
+        else if (value && value.nodeType) values.push(nodeText(value))
+        else if (value !== undefined && value !== null) values.push(String(value))
+      }
+      add(instance.options && instance.options.title)
+      add(instance.options && instance.options.content)
+      add(instance.config && instance.config.title)
+      add(instance.config && instance.config.content)
+      try { add(instance.getTitle && instance.getTitle()) } catch (_) {}
+      try { add(instance.getContent && instance.getContent()) } catch (_) {}
+      try { add(instance.tip && instance.tip()) } catch (_) {}
+      add(instance.$tip && instance.$tip[0])
+    } catch (_) {}
+    return clean(values.join("\n"))
+  }
+
   const extractTeachers = (value) => {
     const result = []
     const source = clean(value)
@@ -269,9 +320,13 @@
   const teacherState = window.__tianyangScheduleTeacherScan || (window.__tianyangScheduleTeacherScan = {
     teachersByCode: {},
     scannedCodes: {},
+    candidateIndexByCode: {},
+    attemptsByCandidate: {},
     pendingCode: "",
+    pendingCandidateKey: "",
     observedTexts: [],
     observedMutations: [],
+    capturedByCode: {},
     pendingAttempts: 0,
     pendingBaseline: [],
     diagnosticsByCode: {},
@@ -279,6 +334,26 @@
   if (!Array.isArray(teacherState.observedTexts)) teacherState.observedTexts = []
   if (!Array.isArray(teacherState.observedMutations)) teacherState.observedMutations = []
   if (!teacherState.diagnosticsByCode) teacherState.diagnosticsByCode = {}
+  if (!teacherState.candidateIndexByCode) teacherState.candidateIndexByCode = {}
+  if (!teacherState.attemptsByCandidate) teacherState.attemptsByCandidate = {}
+  if (!teacherState.capturedByCode) teacherState.capturedByCode = {}
+
+  const candidatesByCode = new Map()
+  for (const course of parsed) {
+    const candidates = candidatesByCode.get(course.code) || []
+    if (!candidates.some((candidate) => candidate.node === course.node)) candidates.push(course)
+    candidatesByCode.set(course.code, candidates)
+  }
+  const candidateKey = (course, index) => `${course.code}:${index}:${course.day}:${course.startSection}-${course.endSection}:${compact(course.room)}`
+
+  const rememberCourseText = (code, value) => {
+    const scoped = scopedCourseText(value, code)
+    if (!scoped) return
+    const captured = teacherState.capturedByCode[code] || []
+    if (!captured.includes(scoped)) captured.push(scoped)
+    if (captured.length > 20) captured.splice(0, captured.length - 20)
+    teacherState.capturedByCode[code] = captured
+  }
 
   const tooltipSelectors = [
     "[role=tooltip]", ".tooltip", ".tooltip-inner", ".popover", ".popover-content",
@@ -357,8 +432,10 @@
             const candidates = [mutation.target, ...mutation.addedNodes]
             for (const node of candidates) {
               const value = clean(node && (node.innerText || node.textContent || ""))
-              if (value && value.length < 1800 && /任课教师|授课教师|主讲教师|教师姓名|老师/.test(value)) {
+              const belongsToPending = Boolean(teacherState.pendingCode && value.includes(teacherState.pendingCode))
+              if (value && value.length < 2600 && (/任课教师|授课教师|主讲教师|教师姓名|老师/.test(value) || belongsToPending)) {
                 teacherState.observedTexts.push(value)
+                if (belongsToPending) rememberCourseText(teacherState.pendingCode, value)
               }
               const description = node && node.nodeType === 1 ? describeNode(node) : null
               if (description && (description.text || mutation.attributeName)) {
@@ -368,6 +445,9 @@
                 for (const attribute of node.attributes) {
                   if (/teacher|tooltip|popover|content|title/i.test(attribute.name) && attribute.value) {
                     teacherState.observedTexts.push(attribute.value)
+                    if (teacherState.pendingCode && attribute.value.includes(teacherState.pendingCode)) {
+                      rememberCourseText(teacherState.pendingCode, attribute.value)
+                    }
                   }
                 }
               }
@@ -385,6 +465,71 @@
       }
     } catch (_) {}
   }
+
+  const courseCodeFromNode = (node) => {
+    const knownCodes = [...candidatesByCode.keys()]
+    for (let current = node, depth = 0; current && depth < 8; current = current.parentElement, depth += 1) {
+      const values = [nodeText(current), attributeText(current)]
+      if (teacherState.pendingCode && values.some((value) => value.includes(teacherState.pendingCode))) {
+        return teacherState.pendingCode
+      }
+      const code = knownCodes.find((candidate) => values.some((value) => value.includes(candidate)))
+      if (code) return code
+    }
+    return ""
+  }
+
+  const collectCourseSources = (course, code) => {
+    const sources = []
+    const add = (source, value) => {
+      const text = scopedCourseText(value, code)
+      if (text && !sources.some((item) => item.text === text)) sources.push({ source, text })
+    }
+    if (course && course.node) {
+      add("card-text", nodeText(course.node))
+      add("card-attributes", attributeText(course.node))
+      add("bootstrap-instance", bootstrapPopoverText(course.node))
+      for (let current = course.node.parentElement, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+        add(`ancestor-${depth + 1}`, nodeText(current))
+        add(`ancestor-attributes-${depth + 1}`, attributeText(current))
+        add(`ancestor-bootstrap-${depth + 1}`, bootstrapPopoverText(current))
+      }
+    }
+    for (const doc of documents) {
+      try {
+        for (const node of doc.querySelectorAll(tooltipSelectors)) {
+          if (elementVisible(node)) add("visible-tooltip", nodeText(node))
+        }
+      } catch (_) {}
+    }
+    for (const value of teacherState.capturedByCode[code] || []) add("captured-event", value)
+    return sources
+  }
+
+  const capturePopoverEvent = (target) => {
+    const code = courseCodeFromNode(target) || teacherState.pendingCode
+    if (!code || (teacherState.pendingCode && code !== teacherState.pendingCode)) return
+    const candidate = (candidatesByCode.get(code) || []).find((course) => {
+      for (let current = target, depth = 0; current && depth < 8; current = current.parentElement, depth += 1) {
+        if (current === course.node) return true
+      }
+      return false
+    }) || (candidatesByCode.get(code) || [])[Number(teacherState.candidateIndexByCode[code] || 0)]
+    for (const source of collectCourseSources(candidate, code)) rememberCourseText(code, source.text)
+  }
+
+  for (const doc of documents) {
+    try {
+      const view = doc.defaultView
+      const jquery = view && (view.jQuery || view.$)
+      if (jquery) {
+        jquery(doc).off(".tianyangSchedule").on("inserted.bs.popover.tianyangSchedule shown.bs.popover.tianyangSchedule", (event) => {
+          capturePopoverEvent(event && event.target)
+        })
+      }
+    } catch (_) {}
+  }
+
   const tooltipNodes = documents.flatMap((doc) => {
     try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible) } catch (_) { return [] }
   })
@@ -396,7 +541,22 @@
   }
   const tooltipEntries = tooltipNodes.map(nodeText)
 
+  const popoverTriggerForCourse = (courseNode) => {
+    const chain = []
+    for (let current = courseNode, depth = 0; current && depth < 7; current = current.parentElement, depth += 1) chain.push(current)
+    return chain.find((current) => {
+      try {
+        if (current.attributes && [...current.attributes].some((attribute) => /tooltip|popover|content|title/i.test(attribute.name))) return true
+        if (current.matches && current.matches(".course,.course-item,.event,.fc-event,[data-toggle=tooltip],[data-toggle=popover],[data-bs-toggle=tooltip],[data-bs-toggle=popover]")) return true
+        const jquery = current.ownerDocument.defaultView.jQuery || current.ownerDocument.defaultView.$
+        if (jquery && (jquery(current).data("bs.popover") || jquery(current).data("popover"))) return true
+        return current.ownerDocument.defaultView.getComputedStyle(current).cursor === "pointer"
+      } catch (_) { return false }
+    }) || courseNode
+  }
+
   const dismissTooltips = (courseNode) => {
+    courseNode = popoverTriggerForCourse(courseNode)
     if (courseNode && courseNode.ownerDocument) {
       try {
         const view = courseNode.ownerDocument.defaultView
@@ -412,18 +572,21 @@
         if (jquery && jquery.fn && jquery.fn.popover) jquery(courseNode).popover("hide")
       } catch (_) {}
     }
-    for (const node of tooltipNodes) {
-      try { node.remove() } catch (_) {
-        try { if (node.parentNode) node.parentNode.removeChild(node) } catch (_) {}
-      }
-    }
+    // Do not remove Bootstrap's tooltip node. The page may cache that node inside
+    // its popover instance; deleting it can prevent later course cards from
+    // opening. pointer-events:none above keeps a fading tooltip from blocking the
+    // next native hover while the page performs its normal hide transition.
   }
 
   if (teacherState.pendingCode) {
-    const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
+    const pendingCandidates = candidatesByCode.get(teacherState.pendingCode) || []
+    const pendingIndex = Math.max(0, Math.min(pendingCandidates.length - 1,
+      Number(teacherState.candidateIndexByCode[teacherState.pendingCode] || 0)))
+    const pendingEntry = pendingCandidates[pendingIndex]
+    const pendingKey = pendingEntry ? candidateKey(pendingEntry, pendingIndex) : teacherState.pendingCandidateKey
     const belongsToPendingCourse = (value) => clean(value).includes(teacherState.pendingCode)
-    const rawMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
-    const pendingMetadata = belongsToPendingCourse(rawMetadata) ? rawMetadata : ""
+    const sources = pendingEntry ? collectCourseSources(pendingEntry, teacherState.pendingCode) : []
+    for (const source of sources) rememberCourseText(teacherState.pendingCode, source.text)
     const observedText = teacherState.observedTexts.splice(0).filter(belongsToPendingCourse).join("\n")
     const tooltipText = tooltipEntries.filter(belongsToPendingCourse).join("\n")
     const visibleNow = visibleDiagnostics()
@@ -431,11 +594,16 @@
     const newlyVisible = visibleNow.filter((item) => !baseline.has(item.text) && belongsToPendingCourse(item.text))
     const mutationSnapshot = teacherState.observedMutations.splice(0)
       .filter((mutation) => belongsToPendingCourse(mutation && mutation.node && mutation.node.text))
-    const found = extractTeachers(`${pendingMetadata}\n${tooltipText}\n${observedText}\n${newlyVisible.map((item) => item.text).join("\n")}`)
+    const capturedText = (teacherState.capturedByCode[teacherState.pendingCode] || []).join("\n")
+    const found = extractTeachers(`${sources.map((item) => item.text).join("\n")}\n${capturedText}\n${tooltipText}\n${observedText}\n${newlyVisible.map((item) => item.text).join("\n")}`)
+    const previousAttempts = Number(teacherState.attemptsByCandidate[pendingKey] || 0)
     const attempt = {
-      attempt: Number(teacherState.pendingAttempts || 0) + 1,
+      attempt: previousAttempts + 1,
+      candidate: pendingIndex + 1,
+      candidateTotal: pendingCandidates.length,
       found,
-      metadata: pendingMetadata.slice(0, 1000),
+      sources: sources.map((item) => ({ source: item.source, text: item.text.slice(0, 700) })).slice(0, 14),
+      metadata: sources.map((item) => item.text).join("\n").slice(0, 1800),
       knownTooltipText: tooltipText.slice(0, 1800),
       observedText: observedText.slice(0, 1800),
       newlyVisible: newlyVisible.slice(0, 16),
@@ -445,15 +613,32 @@
     currentDiagnostics.attempts.push(attempt)
     currentDiagnostics.network = pendingEntry ? networkDiagnostics(pendingEntry) : []
     teacherState.diagnosticsByCode[teacherState.pendingCode] = currentDiagnostics
-    if (found.length) teacherState.teachersByCode[teacherState.pendingCode] = found
+    if (found.length) {
+      const existing = teacherState.teachersByCode[teacherState.pendingCode] || []
+      teacherState.teachersByCode[teacherState.pendingCode] = [...new Set([...existing, ...found])]
+    }
     dismissTooltips(pendingEntry && pendingEntry.node)
-    if (found.length || Number(teacherState.pendingAttempts || 0) >= 2) {
+    if (found.length) {
       teacherState.scannedCodes[teacherState.pendingCode] = true
       teacherState.pendingCode = ""
+      teacherState.pendingCandidateKey = ""
       teacherState.pendingAttempts = 0
       teacherState.pendingBaseline = []
     } else {
-      teacherState.pendingAttempts = Number(teacherState.pendingAttempts || 0) + 1
+      const attempts = previousAttempts + 1
+      teacherState.attemptsByCandidate[pendingKey] = attempts
+      teacherState.pendingAttempts = attempts
+      if (attempts >= 2) {
+        const nextIndex = pendingIndex + 1
+        teacherState.candidateIndexByCode[teacherState.pendingCode] = nextIndex
+        teacherState.pendingCode = ""
+        teacherState.pendingCandidateKey = ""
+        teacherState.pendingAttempts = 0
+        teacherState.pendingBaseline = []
+        if (nextIndex >= pendingCandidates.length && pendingEntry) {
+          teacherState.scannedCodes[pendingEntry.code] = true
+        }
+      }
     }
   }
 
@@ -475,26 +660,32 @@
   })).sort((a, b) => a.day - b.day || a.startSection - b.startSection || a.name.localeCompare(b.name, "zh-CN"))
 
   if (courses.length >= 3 && /^20\d{2}-\d{2}-\d{2}$/.test(startsOn)) {
-    const nextTeacherCourse = parsed.find((course) => course.code === teacherState.pendingCode) || parsed.find((course) => !course.teachers.length
-      && !(teacherState.teachersByCode[course.code] || []).length
-      && !teacherState.scannedCodes[course.code])
+    const uniqueCodes = [...candidatesByCode.keys()]
+    let nextCode = teacherState.pendingCode
+    if (!nextCode) {
+      nextCode = uniqueCodes.find((code) => {
+        const known = teacherState.teachersByCode[code] || []
+        if (known.length || teacherState.scannedCodes[code]) return false
+        const index = Number(teacherState.candidateIndexByCode[code] || 0)
+        if (index < (candidatesByCode.get(code) || []).length) return true
+        teacherState.scannedCodes[code] = true
+        return false
+      }) || ""
+    }
+    const nextCandidates = candidatesByCode.get(nextCode) || []
+    const nextCandidateIndex = Math.max(0, Number(teacherState.candidateIndexByCode[nextCode] || 0))
+    const nextTeacherCourse = nextCandidates[nextCandidateIndex]
     if (nextTeacherCourse) {
       const courseNode = nextTeacherCourse.node
-      const hoverChain = []
-      for (let current = courseNode, depth = 0; current && depth < 7; current = current.parentElement, depth += 1) hoverChain.push(current)
-      const node = hoverChain.find((current) => {
-        try {
-          if (current.attributes && [...current.attributes].some((attribute) => /tooltip|popover|content|title/i.test(attribute.name))) return true
-          if (current.matches && current.matches(".course,.course-item,.event,.fc-event,[data-toggle=tooltip],[data-bs-toggle=tooltip]")) return true
-          return current.ownerDocument.defaultView.getComputedStyle(current).cursor === "pointer"
-        } catch (_) { return false }
-      }) || courseNode
+      const node = popoverTriggerForCourse(courseNode)
       try {
         teacherState.observedTexts.splice(0)
         teacherState.observedMutations.splice(0)
-        if (teacherState.pendingCode !== nextTeacherCourse.code) {
+        const nextKey = candidateKey(nextTeacherCourse, nextCandidateIndex)
+        if (teacherState.pendingCode !== nextTeacherCourse.code || teacherState.pendingCandidateKey !== nextKey) {
           teacherState.pendingCode = nextTeacherCourse.code
-          teacherState.pendingAttempts = 0
+          teacherState.pendingCandidateKey = nextKey
+          teacherState.pendingAttempts = Number(teacherState.attemptsByCandidate[nextKey] || 0)
           teacherState.pendingBaseline = visibleDiagnostics().map((item) => item.text)
         }
         node.scrollIntoView({ block: "center", inline: "center", behavior: "auto" })
@@ -522,13 +713,30 @@
           action: "teacher-wait",
           x: hoverX / window.innerWidth,
           y: hoverY / window.innerHeight,
-          teacherDone: Object.keys(teacherState.scannedCodes).length,
-          teacherTotal: [...new Set(parsed.map((course) => course.code))].length,
+          teacherDone: uniqueCodes.filter((code) => teacherState.scannedCodes[code]
+            || (teacherState.teachersByCode[code] || []).length).length,
+          teacherTotal: uniqueCodes.length,
+          candidate: nextCandidateIndex + 1,
+          candidateTotal: nextCandidates.length,
           courseCount: courses.length,
-          delayMs: 1200 + Number(teacherState.pendingAttempts || 0) * 600,
+          delayMs: 900 + Number(teacherState.pendingAttempts || 0) * 450,
         }
       } catch (_) {
-        teacherState.scannedCodes[nextTeacherCourse.code] = true
+        teacherState.attemptsByCandidate[candidateKey(nextTeacherCourse, nextCandidateIndex)] = 2
+        teacherState.candidateIndexByCode[nextTeacherCourse.code] = nextCandidateIndex + 1
+        teacherState.pendingCode = ""
+        teacherState.pendingCandidateKey = ""
+        if (nextCandidateIndex + 1 >= nextCandidates.length) teacherState.scannedCodes[nextTeacherCourse.code] = true
+        return {
+          action: "teacher-wait",
+          x: -1,
+          y: -1,
+          teacherDone: uniqueCodes.filter((code) => teacherState.scannedCodes[code]
+            || (teacherState.teachersByCode[code] || []).length).length,
+          teacherTotal: uniqueCodes.length,
+          courseCount: courses.length,
+          delayMs: 700,
+        }
       }
     }
     return {
