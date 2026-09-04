@@ -157,6 +157,70 @@ test("teaching-system extractor collects unlabeled teacher names from the real h
   assert.deepEqual([...second.schedule.courses[0].teachers], ["姚卫红", "马野"])
 })
 
+test("teaching-system extractor does not leak teachers from stale popovers into other courses", async () => {
+  const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
+  const visibleTooltips = []
+  class TestEvent { constructor(type) { this.type = type } }
+  const window = {
+    innerWidth: 1000,
+    innerHeight: 1000,
+    parent: null,
+    PointerEvent: TestEvent,
+    MouseEvent: TestEvent,
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", cursor: "default", position: "static", zIndex: "auto" }),
+  }
+  window.parent = window
+  const document = {
+    body: { innerText: "2026-2027学年第一学期\n第1周 2026-08-31—2026-09-06" },
+    documentElement: { innerHTML: "2026-2027学年第一学期 2026-08-31" },
+    defaultView: window,
+    location: { href: "http://jxgl.dlut.edu.cn/student/schedule" },
+    getElementById: () => null,
+  }
+  const tooltipTexts = {
+    "1000000000001.01": "1000000000001.01课程甲\n计2401/02\n张三\n凌水主校区 综合教学1号楼 A101(1~10周)\n组号: 默认组",
+    "1000000000002.01": "1000000000002.01课程乙\n计2401/02\n李四\n凌水主校区 综合教学1号楼 A102(1~10周)\n组号: 默认组",
+    "1000000000003.01": "1000000000003.01课程丙\n计2401/02\n王五\n凌水主校区 综合教学1号楼 A103(1~10周)\n组号: 默认组",
+  }
+  const makeNode = (innerText, code = "") => ({
+    innerText,
+    value: "",
+    textContent: innerText,
+    children: [],
+    parentElement: null,
+    ownerDocument: document,
+    attributes: [],
+    querySelectorAll: () => [],
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 60 }),
+    scrollIntoView: () => {},
+    dispatchEvent: (event) => {
+      if (code && event.type === "mouseover" && !visibleTooltips.some((item) => item.innerText.startsWith(code))) {
+        visibleTooltips.push(makeNode(tooltipTexts[code]))
+      }
+    },
+    focus: () => {},
+  })
+  const cards = Object.keys(tooltipTexts).map((code, index) => makeNode(`${code}\n课程${"甲乙丙"[index]}\n教学楼 A10${index + 1} (1~10周) ${index + 1} (1,2)`, code))
+  document.querySelectorAll = (selector) => {
+    if (selector === "iframe") return []
+    if (selector.startsWith("td,")) return cards
+    if (selector.includes("[role=tooltip]")) return visibleTooltips
+    return []
+  }
+
+  const context = { document, window, Date, Map, Set }
+  let result
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    result = vm.runInNewContext(source, context)
+    if (result.action === "data") break
+  }
+  assert.equal(result.action, "data")
+  assert.deepEqual([...result.schedule.courses[0].teachers], ["张三"])
+  assert.deepEqual([...result.schedule.courses[1].teachers], ["李四"])
+  assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
+})
+
 test("teaching-system extractor reads teachers captured from schedule responses", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   const block = (innerText) => ({ innerText, value: "", textContent: innerText, children: [], querySelectorAll: () => [] })

@@ -385,18 +385,22 @@
       }
     } catch (_) {}
   }
-  const tooltipText = documents.flatMap((doc) => {
+  const tooltipEntries = documents.flatMap((doc) => {
     try { return [...doc.querySelectorAll(tooltipSelectors)].filter(elementVisible).map(nodeText) } catch (_) { return [] }
-  }).join("\n")
+  })
 
   if (teacherState.pendingCode) {
     const pendingEntry = parsed.find((entry) => entry.code === teacherState.pendingCode)
-    const pendingMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
-    const observedText = teacherState.observedTexts.splice(0).join("\n")
+    const belongsToPendingCourse = (value) => clean(value).includes(teacherState.pendingCode)
+    const rawMetadata = pendingEntry ? attributeText(pendingEntry.node) : ""
+    const pendingMetadata = belongsToPendingCourse(rawMetadata) ? rawMetadata : ""
+    const observedText = teacherState.observedTexts.splice(0).filter(belongsToPendingCourse).join("\n")
+    const tooltipText = tooltipEntries.filter(belongsToPendingCourse).join("\n")
     const visibleNow = visibleDiagnostics()
     const baseline = new Set(teacherState.pendingBaseline || [])
-    const newlyVisible = visibleNow.filter((item) => !baseline.has(item.text))
+    const newlyVisible = visibleNow.filter((item) => !baseline.has(item.text) && belongsToPendingCourse(item.text))
     const mutationSnapshot = teacherState.observedMutations.splice(0)
+      .filter((mutation) => belongsToPendingCourse(mutation && mutation.node && mutation.node.text))
     const found = extractTeachers(`${pendingMetadata}\n${tooltipText}\n${observedText}\n${newlyVisible.map((item) => item.text).join("\n")}`)
     const attempt = {
       attempt: Number(teacherState.pendingAttempts || 0) + 1,
