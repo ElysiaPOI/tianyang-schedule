@@ -36,32 +36,14 @@ test("android import keeps credentials inside the official web page", async () =
   assert.match(importer, /isDlutHttpUri/)
   assert.match(importer, /读取当前课表/)
   assert.match(importer, /readCurrentSchedule/)
-  assert.match(importer, /复制诊断/)
-  assert.match(importer, /teacher-multisource-2/)
-  assert.match(importer, /ClipboardManager/)
   assert.match(extractor, /action: "data"/)
   assert.match(extractor, /source: "web"/)
-  assert.match(extractor, /teacher-wait/)
-  assert.match(extractor, /mouseenter/)
-  assert.match(extractor, /scrollIntoView/)
-  assert.match(extractor, /MutationObserver/)
-  assert.match(extractor, /__tianyangScheduleNetworkPayloads/)
-  assert.match(extractor, /pendingAttempts/)
-  assert.match(extractor, /candidateIndexByCode/)
-  assert.match(extractor, /bootstrapPopoverText/)
-  assert.match(extractor, /shown\.bs\.popover/)
-  assert.match(extractor, /scopedCourseText/)
-  assert.match(extractor, /newlyVisible/)
-  assert.match(extractor, /attributeFilter: \["class", "style", "aria-hidden"/)
-  assert.match(extractor, /diagnostics:/)
+  assert.match(extractor, /teachers: \[\]/)
+  assert.doesNotMatch(extractor, /teacher-wait|mouseenter|scrollIntoView|MutationObserver|dispatchEvent/i)
+  assert.doesNotMatch(importer, /复制诊断|teacher-multisource|ClipboardManager|MotionEvent/)
   assert.match(importer, /EXTRA_SCHEDULE_JSON/)
   assert.match(importer, /isValidExtractedSchedule/)
   assert.match(main, /tianyang:android-schedule-ready/)
-  assert.match(importer, /WebViewCompat\.addDocumentStartJavaScript/)
-  assert.match(importer, /WebViewFeature\.DOCUMENT_START_SCRIPT/)
-  assert.match(importer, /MotionEvent\.ACTION_HOVER_MOVE/)
-  assert.match(importer, /MotionEvent\.ACTION_HOVER_EXIT/)
-  assert.match(importer, /MotionEvent\.ACTION_HOVER_ENTER/)
   assert.match(importer, /removeAllCookies/)
   assert.doesNotMatch(importer, /PrintedPdfDocument|capturePicture|DownloadListener|scheduleAutomationStep/)
   assert.doesNotMatch(extractor, /打印大课表|导出至一个PDF文件|domClicked|action: "schedule"|action: "pdf"/)
@@ -114,7 +96,7 @@ test("teaching-system extractor reads course cards without exporting PDF", async
   assert.deepEqual([...result.schedule.courses[1].weeks], [2, 4, 6, 8, 10, 12, 14, 16])
 })
 
-test("teaching-system extractor collects unlabeled teacher names from the real hover layout", async () => {
+test("teaching-system extractor ignores hover-only teacher details", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   let tooltipVisible = false
   class TestEvent {
@@ -161,14 +143,13 @@ test("teaching-system extractor collects unlabeled teacher names from the real h
   }
 
   const context = { document, window, Date, Map, Set }
-  const first = vm.runInNewContext(source, context)
-  assert.equal(first.action, "teacher-wait")
-  const second = vm.runInNewContext(source, context)
-  assert.equal(second.action, "data")
-  assert.deepEqual([...second.schedule.courses[0].teachers], ["姚卫红", "马野"])
+  const result = vm.runInNewContext(source, context)
+  assert.equal(result.action, "data")
+  assert.deepEqual([...result.schedule.courses[0].teachers], [])
+  assert.equal(tooltipVisible, false)
 })
 
-test("teaching-system extractor does not leak teachers from stale popovers into other courses", async () => {
+test("teaching-system extractor does not open or depend on course popovers", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   const visibleTooltips = []
   let maxVisibleTooltips = 0
@@ -242,15 +223,15 @@ test("teaching-system extractor does not leak teachers from stale popovers into 
     if (result.action === "data") break
   }
   assert.equal(result.action, "data")
-  assert.deepEqual([...result.schedule.courses[0].teachers], ["张三"])
-  assert.deepEqual([...result.schedule.courses[1].teachers], ["李四"])
-  assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
-  assert.equal(maxVisibleTooltips, 1)
+  assert.deepEqual([...result.schedule.courses[0].teachers], [])
+  assert.deepEqual([...result.schedule.courses[1].teachers], [])
+  assert.deepEqual([...result.schedule.courses[2].teachers], [])
+  assert.equal(maxVisibleTooltips, 0)
   assert.equal(visibleTooltips.length, 0)
   assert.equal(forcedRemoveCalls, 0)
 })
 
-test("teaching-system extractor tries another card and reads teacher metadata outside the popup", async () => {
+test("teaching-system extractor does not scan duplicate cards for teachers", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   class TestEvent { constructor(type) { this.type = type } }
   const window = {
@@ -320,13 +301,13 @@ test("teaching-system extractor tries another card and reads teacher metadata ou
   assert.equal(result.action, "data")
   const courseA = result.schedule.courses.filter((course) => course.code === "1000000000001.01")
   assert.equal(courseA.length, 2)
-  assert.deepEqual([...courseA[0].teachers], ["张三"])
-  assert.deepEqual([...courseA[1].teachers], ["张三"])
-  assert.equal(hoverCounts[0], 2)
-  assert.equal(hoverCounts[1], 1)
+  assert.deepEqual([...courseA[0].teachers], [])
+  assert.deepEqual([...courseA[1].teachers], [])
+  assert.equal(hoverCounts[0], 0)
+  assert.equal(hoverCounts[1], 0)
 })
 
-test("teaching-system extractor reads teachers captured from schedule responses", async () => {
+test("teaching-system extractor leaves web teachers empty even when page data contains names", async () => {
   const source = await read("android/app/src/main/res/raw/dlut_schedule_extractor.js")
   const block = (innerText) => ({ innerText, value: "", textContent: innerText, children: [], querySelectorAll: () => [] })
   const cards = [
@@ -346,9 +327,9 @@ test("teaching-system extractor reads teachers captured from schedule responses"
   }
   const result = vm.runInNewContext(source, { document, window, Date, Map, Set })
   assert.equal(result.action, "data")
-  assert.deepEqual([...result.schedule.courses[0].teachers], ["张三"])
-  assert.deepEqual([...result.schedule.courses[1].teachers], ["李四"])
-  assert.deepEqual([...result.schedule.courses[2].teachers], ["王五"])
+  assert.deepEqual([...result.schedule.courses[0].teachers], [])
+  assert.deepEqual([...result.schedule.courses[1].teachers], [])
+  assert.deepEqual([...result.schedule.courses[2].teachers], [])
 })
 
 test("android webview opens a multi-format document picker", async () => {

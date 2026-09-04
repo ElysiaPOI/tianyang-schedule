@@ -29,3 +29,12 @@ test("current day is outlined in the weekly timetable", async () => {
   assert.match(css, /\.today-column-highlight/)
   assert.match(css, /border:\s*2px dashed/)
 })
+
+test("web imports omit unknown teachers from the main timetable", async () => {
+  const source = await read("app/schedule-app.tsx")
+  assert.match(source, /course\.teachers\.length > 0 && <span><UserRound/)
+  assert.match(source, /任课教师<\/small>\{course\.teachers\.join\("、"\) \|\| "未获取"/)
+  assert.match(source, /parsed\.source === "web" \? \[\]/)
+  assert.match(source, /schedule\.courses\.map\(\(course\) => \(\{ \.\.\.course, teachers: \[\] \}\)\)/)
+  assert.doesNotMatch(source, /教师未获取/)
+})

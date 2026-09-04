@@ -163,7 +163,8 @@ function scheduleFromTeachingSystem(value: unknown): Schedule | null {
   if (!isRecord(value) || typeof value.term !== "string" || !/^20\d{2}-\d{2}-\d{2}$/.test(String(value.startsOn))
     || typeof value.importedAt !== "string" || value.source !== "web" || !Array.isArray(value.courses)
     || value.courses.length < 3 || !value.courses.every(isCourseBackup)) return null
-  return value as unknown as Schedule
+  const schedule = value as unknown as Schedule
+  return { ...schedule, courses: schedule.courses.map((course) => ({ ...course, teachers: [] })) }
 }
 
 const shortCourseNames: Record<string, string> = {
@@ -197,7 +198,7 @@ function CourseBar({ course, weekView = false, onOpen }: { course: Course; weekV
       <strong>{course.cancelled ? `停课 · ${weekView ? shortCourseName(course.name) : course.name}` : weekView ? shortCourseName(course.name) : course.name}</strong>
       {course.note && <NotebookPen className="note-indicator" aria-label="有备注" />}
     </span>
-    {!weekView && (course.cancelled ? <span className="cancelled-meta">本周已停课</span> : <span className="course-bar-meta"><span><MapPin /><span className="room-text">{course.room}</span></span><span><UserRound /><em>{course.teachers.join("、") || "教师未获取"}</em></span></span>)}
+    {!weekView && (course.cancelled ? <span className="cancelled-meta">本周已停课</span> : <span className="course-bar-meta"><span><MapPin /><span className="room-text">{course.room}</span></span>{course.teachers.length > 0 && <span><UserRound /><em>{course.teachers.join("、")}</em></span>}</span>)}
     {weekView && <small>{course.cancelled ? "本周停课" : compactRoom(course.room)}</small>}
   </button>
 }
@@ -447,7 +448,7 @@ function CourseDetailDialog({
         <div><CalendarDays /><span><small>日期与周次</small>{dayNames[course.day - 1]} · {date.getMonth() + 1}月{date.getDate()}日 · {compactWeeks(course.weeks)}</span></div>
         <div><Clock3 /><span><small>上课时间</small>第 {course.startSection}–{course.endSection} 节 · {exactTime}</span></div>
         <div><MapPin /><span><small>上课地点</small>{course.room}</span></div>
-        <div><UserRound /><span><small>任课教师</small>{course.teachers.join("、") || "教师未获取"}</span></div>
+        <div><UserRound /><span><small>任课教师</small>{course.teachers.join("、") || "未获取"}</span></div>
       </div>
       <div className="note-field">
         <Label htmlFor="course-note"><NotebookPen />课程备注</Label>
@@ -546,7 +547,7 @@ export default function ScheduleApp() {
       const previous = previousById.get(course.id) ?? previousBySignature.get(signature(course))
       return {
         ...course,
-        teachers: course.teachers.length ? course.teachers : previous?.teachers ?? [],
+        teachers: parsed.source === "web" ? [] : course.teachers.length ? course.teachers : previous?.teachers ?? [],
         note: previous?.note,
         overrides: previous?.overrides,
       }
